@@ -1,0 +1,33 @@
+[package]
+name = "pages2docx"
+description = "Converts Apple Pages documents to Word .docx and opens them in a configurable word processor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "pages2docx"
+path = "src/main.rs"
+
+[[bin]]
+name = "pages2docxw"
+path = "src/bin/pages2docxw.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+iwork = { path = "../iwork" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+zip = { version = "7.3.0", default-features = false, features = ["deflate"] }
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }
+winreg = "0.56.0"
+
+[dev-dependencies]
+snap = "1.1.2"
