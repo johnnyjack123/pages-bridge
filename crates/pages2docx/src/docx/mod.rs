@@ -451,9 +451,8 @@ impl Writer<'_> {
         for row in &t.rows {
             out.push_str("<w:tr>");
             let mut trpr = String::new();
-            // Pages' row height includes the cell padding. Word does too, but WordCraft adds
-            // the padding on top; without it the row is right in WordCraft and at most the
-            // padding short in Word, where the content usually fills it anyway.
+            // Pages' row height includes the cell padding; Word and WordCraft both add the
+            // padding to the height written here (compared against a Pages PDF), so leave it out.
             if let Some(h) = row.height.map(|h| h - pt - pb).filter(|h| *h > 0.0) {
                 let _ = write!(trpr, "<w:trHeight w:val=\"{}\"/>", twips(h));
             }
@@ -524,11 +523,13 @@ impl Writer<'_> {
                     Wrap::Around => "<wp:wrapSquare wrapText=\"bothSides\"/>",
                     Wrap::AboveAndBelow => "<wp:wrapTopAndBottom/>",
                 };
-                // 12 pt around the picture, Pages' default wrap margin.
+                // Pages' default wrap margin of 12 pt, but not above: Pages places the picture
+                // by its offset alone, and a margin above makes Word push a table that ends just
+                // above the picture down below it.
                 let gap = emu(12.0);
                 let _ = write!(
                     out,
-                    "<w:r><w:drawing><wp:anchor distT=\"{gap}\" distB=\"{gap}\" distL=\"{gap}\" distR=\"{gap}\" \
+                    "<w:r><w:drawing><wp:anchor distT=\"0\" distB=\"{gap}\" distL=\"{gap}\" distR=\"{gap}\" \
                      simplePos=\"0\" relativeHeight=\"{n}\" behindDoc=\"0\" locked=\"0\" layoutInCell=\"1\" allowOverlap=\"0\">\
                      <wp:simplePos x=\"0\" y=\"0\"/>\
                      <wp:positionH relativeFrom=\"column\"><wp:posOffset>{}</wp:posOffset></wp:positionH>\
