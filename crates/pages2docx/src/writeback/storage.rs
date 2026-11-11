@@ -353,7 +353,13 @@ impl Builder<'_, '_, '_> {
             );
             let (format, link) = p1.char_format(i);
             let field = self.field_for(base.and_then(|b| b.field), link);
-            let style = self.style_for(inherited_style, &mark, format, field, &mut format_lost);
+            // A picture's run carries no character formatting in the docx; its anchor keeps
+            // whatever style it had.
+            let style = if c == '\u{FFFC}' {
+                inherited_style
+            } else {
+                self.style_for(inherited_style, &mark, format, field, &mut format_lost)
+            };
             chars.push(c);
             attrs.push(CharAttrs { style, field, attachment: base.and_then(|b| b.attachment) });
         }

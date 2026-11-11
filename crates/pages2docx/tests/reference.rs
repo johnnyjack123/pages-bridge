@@ -66,3 +66,18 @@ fn showcase() {
         assert!(xml.contains(&format!("<w:pStyle w:val=\"{style}\"/>")), "{style}");
     }
 }
+
+/// Writing back an unchanged conversion must find nothing to write, for every reference.
+#[test]
+fn unchanged_references_write_nothing() {
+    for name in ["Cuba hoy.pages", "Showcase.pages"] {
+        let Some(pages) = reference(name) else { continue };
+        let dir = std::env::temp_dir().join(format!("pages2docx-ref-identity-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (docx, out) = (dir.join("a.docx"), dir.join("a.pages"));
+        pages2docx::convert(&pages, &docx).unwrap();
+        let report = pages2docx::writeback::write_back(&pages, &docx, &out, Default::default()).unwrap();
+        assert!(!out.exists() && report.not_written.is_empty(), "{name}: {report:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
