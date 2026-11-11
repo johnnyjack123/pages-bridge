@@ -74,8 +74,8 @@ pub fn describe(error: &Error, path: &Path) -> String {
     }
 }
 
-pub const HELP_WRITEBACK: &str = "Änderungen aus der bearbeiteten .docx in die Pages-Datei zurückschreiben \
-                                  (Testphase: schreibt eine neue Datei, das Original bleibt unverändert)";
+pub const HELP_WRITEBACK: &str = "Änderungen aus einer bearbeiteten .docx von Hand zurückschreiben, in eine neue \
+                                  Pages-Datei (beim Doppelklick passiert das automatisch)";
 pub const HELP_WRITEBACK_DOCX: &str = "Die bearbeitete .docx-Datei";
 pub const HELP_WRITEBACK_PAGES: &str = "Die ursprüngliche .pages-Datei (Standard: gleicher Name wie die .docx)";
 pub const HELP_OUTPUT_PAGES: &str = "Zieldatei (Standard: „Name (bearbeitet).pages“ neben dem Original)";
