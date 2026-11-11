@@ -10,7 +10,9 @@ fn reference(name: &str) -> Option<PathBuf> {
 }
 
 fn document_xml(pages: &Path) -> String {
-    let dir = std::env::temp_dir().join(format!("pages2docx-ref-{}", std::process::id()));
+    // Tests run in parallel: one folder per document.
+    let stem = pages.file_stem().unwrap().to_string_lossy();
+    let dir = std::env::temp_dir().join(format!("pages2docx-ref-{stem}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let docx = dir.join("out.docx");
     pages2docx::convert(pages, &docx).unwrap();
@@ -40,4 +42,27 @@ fn cuba_hoy() {
     assert!(xml.contains("<w:pgMar w:top=\"994\""));
     // Every second body row of the table is banded.
     assert!(xml.contains("w:fill=\"F5F5F5\""));
+}
+
+#[test]
+fn showcase() {
+    let Some(pages) = reference("Showcase.pages") else {
+        eprintln!("reference/Showcase.pages missing, skipped");
+        return;
+    };
+    let xml = document_xml(&pages);
+    // The picture moves with the text: anchored, centred by its 86.53 pt offset, below the
+    // table by its 131.82 pt offset, text above and below it.
+    assert!(xml.contains("<wp:posOffset>1098945</wp:posOffset>"), "horizontal offset");
+    assert!(xml.contains("<wp:posOffset>1674083</wp:posOffset>"), "vertical offset");
+    assert!(xml.contains("<wp:wrapTopAndBottom/>"));
+    // The built-in "Heading 3" draws a grey rule above itself.
+    let heading3 = &xml[..xml.find(">Überschrift3<").unwrap()];
+    let paragraph = &heading3[heading3.rfind("<w:p>").unwrap()..];
+    assert!(paragraph.contains("<w:pStyle w:val=\"Heading3\"/>") && paragraph.contains("<w:pBdr><w:top w:val=\"single\" w:sz=\"4\""));
+    // Row heights leave out the 4 pt cell padding at top and bottom: 22.73 − 8 pt.
+    assert!(xml.contains("<w:trHeight w:val=\"295\"/>"));
+    for style in ["Title", "Subtitle", "Heading1", "Heading2"] {
+        assert!(xml.contains(&format!("<w:pStyle w:val=\"{style}\"/>")), "{style}");
+    }
 }

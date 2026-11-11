@@ -8,7 +8,7 @@ use iwork::{Msg, Raw};
 
 use super::{Ctx, Part, Reader, kinds};
 use crate::messages;
-use crate::model::{Block, Image, InlineKind};
+use crate::model::{Block, Float, Image, InlineKind, Wrap};
 
 pub(super) enum Attached {
     Nothing,
@@ -25,8 +25,12 @@ impl Reader<'_> {
         let Some(id) = id else { return Attached::Nothing };
         match self.pkg.kind(id) {
             Some(kinds::DRAWABLE_ATTACHMENT) => {
-                let drawable = self.pkg.object(id).and_then(|m| m.reference(1));
-                self.drawable(drawable, ctx, 0)
+                // TSWP.DrawableAttachmentArchive: drawable, then horizontal and vertical offset
+                // from the anchor (fields 3 and 5) for objects that move with the text.
+                let attachment = self.pkg.object(id);
+                let drawable = attachment.as_ref().and_then(|m| m.reference(1));
+                let offset = attachment.as_ref().map_or((0.0, 0.0), |m| (m.float(3).unwrap_or(0.0), m.float(5).unwrap_or(0.0)));
+                self.drawable(drawable, ctx, 0, offset)
             }
             // The other attachments in headers and footers are page number fields.
             _ if ctx.part == Part::Header => Attached::Inline(vec![InlineKind::PageNumber]),
@@ -37,7 +41,7 @@ impl Reader<'_> {
         }
     }
 
-    fn drawable(&mut self, id: Option<u64>, ctx: Ctx, depth: u32) -> Attached {
+    fn drawable(&mut self, id: Option<u64>, ctx: Ctx, depth: u32, offset: (f64, f64)) -> Attached {
         let pkg = self.pkg;
         let Some(id) = id else { return Attached::Nothing };
         let Some(m) = pkg.object(id) else { return Attached::Nothing };
@@ -48,7 +52,7 @@ impl Reader<'_> {
             self.report.skip(messages::SKIP_NESTED_TABLE);
             return Attached::Nothing;
         }
-        if let Some(image) = self.image(&m, ctx) {
+        if let Some(image) = self.image(&m, ctx, offset) {
             return image;
         }
         let storages: Vec<u64> = m
@@ -64,7 +68,7 @@ impl Reader<'_> {
             // Groups list their members in field 2.
             let (mut inline, mut blocks) = (Vec::new(), Vec::new());
             for child in single_refs(&m, 2) {
-                match self.drawable(Some(child), ctx, depth + 1) {
+                match self.drawable(Some(child), ctx, depth + 1, (0.0, 0.0)) {
                     Attached::Inline(k) => inline.extend(k),
                     Attached::Blocks(b) => blocks.extend(b),
                     Attached::Nothing => {}
@@ -82,7 +86,7 @@ impl Reader<'_> {
     }
 
     /// A picture: `Some` when `m` references image data, even if it cannot be used.
-    fn image(&mut self, m: &Msg, ctx: Ctx) -> Option<Attached> {
+    fn image(&mut self, m: &Msg, ctx: Ctx, offset: (f64, f64)) -> Option<Attached> {
         let pkg = self.pkg;
         let data_id = IMAGE_DATA_FIELDS
             .iter()
@@ -115,9 +119,19 @@ impl Reader<'_> {
             height *= ctx.max_width / width;
             width = ctx.max_width;
         }
+        // TSD.ExteriorTextWrapArchive type (drawable field 3.1): 0 for objects inline with the
+        // text, as Pages' tables are; pictures inserted with Pages' default "move with text"
+        // carry 4. Pages' automatic wrap leaves the sides empty when the picture takes most of
+        // the line, so wide pictures get text only above and below.
+        let wrap_type = m.msg(1).and_then(|d| d.msg(3)).and_then(|w| w.uint(1)).unwrap_or(0);
+        let float = (wrap_type != 0).then(|| Float {
+            x: offset.0,
+            y: offset.1,
+            wrap: if width > ctx.max_width / 2.0 { Wrap::AboveAndBelow } else { Wrap::Around },
+        });
         let index = self.images.len();
         self.images.push(Image { data, ext, pixel_size: pixels });
-        Some(Attached::Inline(vec![InlineKind::Image { index, width, height }]))
+        Some(Attached::Inline(vec![InlineKind::Image { index, width, height, float }]))
     }
 }
 

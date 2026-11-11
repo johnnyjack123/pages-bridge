@@ -6,8 +6,8 @@ use std::collections::{HashMap, HashSet};
 use iwork::{Msg, Package};
 
 use crate::model::{
-    Align, Caps, CharProps, LineSpacing, ListLabel, ListLevel, ListStyle, NumberFormat, ParaKind, ParaProps, Rgb,
-    Strike, TabAlign, TabStop, Underline, VerticalAlign,
+    Align, Caps, CharProps, LineSpacing, ListLabel, ListLevel, ListStyle, NumberFormat, ParaBorder, ParaKind, ParaProps,
+    Rgb, Strike, TabAlign, TabStop, Underline, VerticalAlign,
 };
 
 /// Field of a character or paragraph style that holds its character properties.
@@ -161,6 +161,19 @@ fn char_props_from(m: &Msg) -> CharProps {
 /// `TSWP.ParagraphStylePropertiesArchive`.
 fn para_props_from(m: &Msg) -> ParaProps {
     ParaProps {
+        // Field 32 is the rule's stroke (color, width, pattern in 6), field 45 the sides it is
+        // drawn on. The built-in "Heading 3" sets 45 to 1 and Pages draws the rule above it.
+        border: m.msg(32).and_then(|stroke| {
+            let width = stroke.float(2).unwrap_or(0.0);
+            let drawn = stroke.msg(6).and_then(|p| p.uint(1)).unwrap_or(1) != 0;
+            let sides = m.uint(45).unwrap_or(0);
+            (width > 0.0 && drawn && sides & 0b11 != 0).then(|| ParaBorder {
+                top: sides & 1 != 0,
+                bottom: sides & 2 != 0,
+                width,
+                color: stroke.msg(1).as_ref().and_then(color).unwrap_or(Rgb(0, 0, 0)),
+            })
+        }),
         align: m.uint(1).map(|v| match v {
             0 => Align::Left,
             1 => Align::Right,

@@ -112,9 +112,20 @@ pub struct TabStop {
     pub align: TabAlign,
 }
 
+/// A rule drawn along the paragraph (Pages "Borders & Rules").
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParaBorder {
+    pub top: bool,
+    pub bottom: bool,
+    /// Points.
+    pub width: f64,
+    pub color: Rgb,
+}
+
 /// Paragraph formatting; `None` means "not set here, inherit". Lengths are points.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ParaProps {
+    pub border: Option<ParaBorder>,
     pub align: Option<Align>,
     pub first_indent: Option<f64>,
     pub left_indent: Option<f64>,
@@ -150,6 +161,25 @@ pub struct ListItem {
     pub restart: Option<u32>,
 }
 
+/// How text flows around a floating picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wrap {
+    /// Text on the sides where there is room.
+    Around,
+    /// Text only above and below.
+    AboveAndBelow,
+}
+
+/// A picture placed apart from the text flow, anchored at its paragraph ("move with text").
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Float {
+    /// Points from the left edge of the text area.
+    pub x: f64,
+    /// Points from the top of the anchor paragraph.
+    pub y: f64,
+    pub wrap: Wrap,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum InlineKind {
     Text(String),
@@ -158,8 +188,8 @@ pub enum InlineKind {
     PageBreak,
     ColumnBreak,
     SoftHyphen,
-    /// Index into [`Document::images`]; size in points.
-    Image { index: usize, width: f64, height: f64 },
+    /// Index into [`Document::images`]; size in points; `float` set when it is not in the line.
+    Image { index: usize, width: f64, height: f64, float: Option<Float> },
     PageNumber,
 }
 

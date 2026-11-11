@@ -109,7 +109,7 @@ impl Reader<'_> {
             let text_style = model.reference(if is_header { 25 } else if is_footer { 27 } else { 24 });
             let body_index = r.saturating_sub(header_rows);
             let mut row = Row {
-                height: (!is_header).then(|| row_sizes.get(&r).copied()).flatten(),
+                height: row_sizes.get(&r).copied(),
                 header: is_header,
                 cells: Vec::new(),
             };

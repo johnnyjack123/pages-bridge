@@ -26,8 +26,8 @@ use numbering::Numbering;
 use xml::{attr, text, twips};
 
 use crate::model::{
-    Align, Block, Border, Caps, CharProps, Document, HeaderFooter, Inline, InlineKind, LineSpacing, ParaKind, ParaProps,
-    Paragraph, Rgb, Strike, TabAlign, Table, Underline, VerticalAlign,
+    Align, Block, Border, Caps, CharProps, Document, Float, HeaderFooter, Inline, InlineKind, LineSpacing, ParaKind,
+    ParaProps, Paragraph, Rgb, Strike, TabAlign, Table, Underline, VerticalAlign, Wrap,
 };
 
 pub(crate) const NS: &str = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" \
@@ -252,9 +252,9 @@ impl Writer<'_> {
                 let _ = write!(out, "<w:fldSimple w:instr=\" PAGE \"><w:r>{rpr}<w:t>1</w:t></w:r></w:fldSimple>");
                 return;
             }
-            InlineKind::Image { index, width, height } => {
+            InlineKind::Image { index, width, height, float } => {
                 if part != Part::Header {
-                    self.image(*index, *width, *height, out);
+                    self.image(*index, *width, *height, *float, out);
                 }
                 return;
             }
@@ -337,6 +337,21 @@ impl Writer<'_> {
         if let Some(item) = list {
             let id = self.numbering.num_id(item.style, item.restart);
             let _ = write!(s, "<w:numPr><w:ilvl w:val=\"{}\"/><w:numId w:val=\"{id}\"/></w:numPr>", item.level);
+        }
+        if let Some(border) = props.border {
+            #[allow(clippy::cast_possible_truncation)]
+            let size = ((border.width * 8.0).round() as i64).clamp(2, 96);
+            let line = |side: &str| {
+                format!("<w:{side} w:val=\"single\" w:sz=\"{size}\" w:space=\"4\" w:color=\"{}\"/>", hex(border.color))
+            };
+            s.push_str("<w:pBdr>");
+            if border.top {
+                s.push_str(&line("top"));
+            }
+            if border.bottom {
+                s.push_str(&line("bottom"));
+            }
+            s.push_str("</w:pBdr>");
         }
         if let Some(tabs) = props.tabs.as_ref().filter(|t| !t.is_empty()) {
             s.push_str("<w:tabs>");
@@ -436,7 +451,10 @@ impl Writer<'_> {
         for row in &t.rows {
             out.push_str("<w:tr>");
             let mut trpr = String::new();
-            if let Some(h) = row.height.filter(|h| *h > 0.0) {
+            // Pages' row height includes the cell padding. Word does too, but WordCraft adds
+            // the padding on top; without it the row is right in WordCraft and at most the
+            // padding short in Word, where the content usually fills it anyway.
+            if let Some(h) = row.height.map(|h| h - pt - pb).filter(|h| *h > 0.0) {
                 let _ = write!(trpr, "<w:trHeight w:val=\"{}\"/>", twips(h));
             }
             if row.header {
@@ -465,7 +483,7 @@ impl Writer<'_> {
         out.push_str("</w:tbl>");
     }
 
-    fn image(&mut self, index: usize, width: f64, height: f64, out: &mut String) {
+    fn image(&mut self, index: usize, width: f64, height: f64, float: Option<Float>, out: &mut String) {
         let Some(image) = self.doc.images.get(index) else { return };
         let id = match self.images.get(&index) {
             Some(id) => id.clone(),
@@ -480,20 +498,48 @@ impl Writer<'_> {
         self.drawing_id += 1;
         let n = self.drawing_id;
         #[allow(clippy::cast_possible_truncation)]
-        let (cx, cy) = ((width * EMU_PER_PT).round() as i64, (height * EMU_PER_PT).round() as i64);
-        let _ = write!(
-            out,
-            "<w:r><w:drawing><wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\">\
-             <wp:extent cx=\"{cx}\" cy=\"{cy}\"/><wp:docPr id=\"{n}\" name=\"Image {n}\"/>\
+        let emu = |pt: f64| (pt * EMU_PER_PT).round() as i64;
+        let (cx, cy) = (emu(width), emu(height));
+        let graphic = format!(
+            "<wp:docPr id=\"{n}\" name=\"Image {n}\"/>\
              <wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect=\"1\"/></wp:cNvGraphicFramePr>\
              <a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">\
              <pic:pic><pic:nvPicPr><pic:cNvPr id=\"{n}\" name=\"image{n}.{ext}\"/><pic:cNvPicPr/></pic:nvPicPr>\
              <pic:blipFill><a:blip r:embed=\"{id}\"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>\
              <pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm>\
              <a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>\
-             </a:graphicData></a:graphic></wp:inline></w:drawing></w:r>",
+             </a:graphicData></a:graphic>",
             ext = image.ext
         );
+        match float {
+            None => {
+                let _ = write!(
+                    out,
+                    "<w:r><w:drawing><wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\">\
+                     <wp:extent cx=\"{cx}\" cy=\"{cy}\"/>{graphic}</wp:inline></w:drawing></w:r>"
+                );
+            }
+            Some(float) => {
+                let wrap = match float.wrap {
+                    Wrap::Around => "<wp:wrapSquare wrapText=\"bothSides\"/>",
+                    Wrap::AboveAndBelow => "<wp:wrapTopAndBottom/>",
+                };
+                // 12 pt around the picture, Pages' default wrap margin.
+                let gap = emu(12.0);
+                let _ = write!(
+                    out,
+                    "<w:r><w:drawing><wp:anchor distT=\"{gap}\" distB=\"{gap}\" distL=\"{gap}\" distR=\"{gap}\" \
+                     simplePos=\"0\" relativeHeight=\"{n}\" behindDoc=\"0\" locked=\"0\" layoutInCell=\"1\" allowOverlap=\"0\">\
+                     <wp:simplePos x=\"0\" y=\"0\"/>\
+                     <wp:positionH relativeFrom=\"column\"><wp:posOffset>{}</wp:posOffset></wp:positionH>\
+                     <wp:positionV relativeFrom=\"paragraph\"><wp:posOffset>{}</wp:posOffset></wp:positionV>\
+                     <wp:extent cx=\"{cx}\" cy=\"{cy}\"/><wp:effectExtent l=\"0\" t=\"0\" r=\"0\" b=\"0\"/>{wrap}{graphic}\
+                     </wp:anchor></w:drawing></w:r>",
+                    emu(float.x),
+                    emu(float.y)
+                );
+            }
+        }
     }
 
     fn header_footer(&mut self, hf: &HeaderFooter, root: &str) -> String {
