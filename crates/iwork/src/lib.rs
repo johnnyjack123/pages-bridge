@@ -10,5 +10,5 @@ mod package;
 mod proto;
 
 pub use archive::decompress_iwa;
-pub use package::{Error, Object, Package};
-pub use proto::{DecodeError, Msg, Raw, read_varint};
+pub use package::{Edits, Error, Object, Package};
+pub use proto::{DecodeError, Encoder, Msg, Raw, read_varint, write_varint};

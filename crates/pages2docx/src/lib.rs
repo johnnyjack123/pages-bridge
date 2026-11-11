@@ -11,6 +11,7 @@ mod messages;
 pub mod model;
 mod reader;
 mod system;
+pub mod writeback;
 
 use std::fmt;
 use std::path::Path;
@@ -26,6 +27,12 @@ pub enum Error {
     /// The package has no Pages document object (a Numbers or Keynote file, for instance).
     NoDocument,
     Io(std::io::Error),
+    /// The edited `.docx` could not be read.
+    Docx(String),
+    /// Writing back would lose content.
+    Unsupported(writeback::Unsupported),
+    /// The written Pages file did not read back as intended and was discarded.
+    Verification(String),
 }
 
 impl fmt::Display for Error {
@@ -34,6 +41,9 @@ impl fmt::Display for Error {
             Error::Package(e) => write!(f, "{e}"),
             Error::NoDocument => f.write_str("no Pages document in this package"),
             Error::Io(e) => write!(f, "{e}"),
+            Error::Docx(why) => write!(f, "cannot read the .docx: {why}"),
+            Error::Unsupported(what) => write!(f, "cannot write back: {what:?}"),
+            Error::Verification(why) => write!(f, "written file failed verification: {why}"),
         }
     }
 }

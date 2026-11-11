@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::package::Error;
 
 enum Source {
-    Zip(RefCell<zip::ZipArchive<BufReader<File>>>),
+    Zip(RefCell<zip::ZipArchive<BufReader<File>>>, PathBuf),
     Dir(PathBuf),
 }
 
@@ -14,7 +14,7 @@ enum Source {
 pub(crate) struct Container {
     source: Source,
     /// Some zips carry the bundle folder as a top-level directory (`Doc.pages/Index/...`).
-    prefix: String,
+    pub(crate) prefix: String,
     names: Vec<String>,
 }
 
@@ -28,7 +28,7 @@ impl Container {
             let archive = zip::ZipArchive::new(BufReader::new(File::open(path)?))
                 .map_err(|_| Error::NotIwork)?;
             let names = archive.file_names().filter(|n| !n.ends_with('/')).map(str::to_owned).collect();
-            (Source::Zip(RefCell::new(archive)), names)
+            (Source::Zip(RefCell::new(archive), path.to_path_buf()), names)
         };
         let prefix = all
             .iter()
@@ -48,10 +48,18 @@ impl Container {
         &self.names
     }
 
+    /// The file of a zipped document; `None` for bundle folders.
+    pub(crate) fn zip_path(&self) -> Option<&Path> {
+        match &self.source {
+            Source::Zip(_, path) => Some(path),
+            Source::Dir(_) => None,
+        }
+    }
+
     pub(crate) fn read(&self, name: &str) -> Result<Vec<u8>, Error> {
         let full = format!("{}{name}", self.prefix);
         match &self.source {
-            Source::Zip(archive) => {
+            Source::Zip(archive, _) => {
                 let mut archive = archive.borrow_mut();
                 let mut entry = archive.by_name(&full).map_err(|e| Error::Corrupt(e.to_string()))?;
                 let mut out = Vec::new();

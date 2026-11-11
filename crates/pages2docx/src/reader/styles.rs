@@ -11,11 +11,11 @@ use crate::model::{
 };
 
 /// Field of a character or paragraph style that holds its character properties.
-pub(super) const CHAR_PROPS: u32 = 11;
+pub(crate)const CHAR_PROPS: u32 = 11;
 /// Field of a paragraph style that holds its paragraph properties.
-pub(super) const PARA_PROPS: u32 = 12;
+pub(crate)const PARA_PROPS: u32 = 12;
 
-pub(super) struct Styles<'p> {
+pub(crate)struct Styles<'p> {
     pkg: &'p Package,
     chars: HashMap<Option<u64>, CharProps>,
     paras: HashMap<Option<u64>, (ParaProps, Option<u64>)>,
@@ -23,7 +23,7 @@ pub(super) struct Styles<'p> {
 }
 
 impl<'p> Styles<'p> {
-    pub(super) fn new(pkg: &'p Package) -> Self {
+    pub(crate)fn new(pkg: &'p Package) -> Self {
         Self { pkg, chars: HashMap::new(), paras: HashMap::new(), kinds: HashMap::new() }
     }
 
@@ -45,7 +45,7 @@ impl<'p> Styles<'p> {
     }
 
     /// Property message `field` with every ancestor's values overridden by the descendants'.
-    pub(super) fn merged(&self, id: Option<u64>, field: u32) -> Msg<'p> {
+    pub(crate)fn merged(&self, id: Option<u64>, field: u32) -> Msg<'p> {
         let mut merged = Msg::default();
         for style in self.chain(id) {
             if let Some(props) = style.msg(field) {
@@ -55,7 +55,7 @@ impl<'p> Styles<'p> {
         merged
     }
 
-    pub(super) fn char_props(&mut self, id: Option<u64>) -> CharProps {
+    pub(crate)fn char_props(&mut self, id: Option<u64>) -> CharProps {
         if let Some(c) = self.chars.get(&id) {
             return c.clone();
         }
@@ -72,17 +72,17 @@ impl<'p> Styles<'p> {
         &self.paras[&id]
     }
 
-    pub(super) fn para_props(&mut self, id: Option<u64>) -> ParaProps {
+    pub(crate)fn para_props(&mut self, id: Option<u64>) -> ParaProps {
         self.para_entry(id).0.clone()
     }
 
     /// The list style a paragraph style applies when the text sets none itself.
-    pub(super) fn para_list_style(&mut self, id: Option<u64>) -> Option<u64> {
+    pub(crate)fn para_list_style(&mut self, id: Option<u64>) -> Option<u64> {
         self.para_entry(id).1
     }
 
     /// Built-in role of a paragraph style, from the closest built-in identifier in its chain.
-    pub(super) fn kind(&mut self, id: Option<u64>) -> ParaKind {
+    pub(crate)fn kind(&mut self, id: Option<u64>) -> ParaKind {
         if let Some(k) = self.kinds.get(&id) {
             return *k;
         }
@@ -107,7 +107,7 @@ impl<'p> Styles<'p> {
     }
 
     /// List styles keep their properties at the top level of the style object.
-    pub(super) fn list_style(&self, id: u64) -> ListStyle {
+    pub(crate)fn list_style(&self, id: u64) -> ListStyle {
         let mut merged = Msg::default();
         for style in self.chain(Some(id)) {
             merged.overlay(&style);
@@ -116,7 +116,7 @@ impl<'p> Styles<'p> {
     }
 }
 
-pub(super) fn color(m: &Msg) -> Option<Rgb> {
+pub(crate)fn color(m: &Msg) -> Option<Rgb> {
     if !m.has(3) {
         return None;
     }

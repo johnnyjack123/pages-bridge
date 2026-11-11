@@ -121,9 +121,30 @@ impl Reader<'_> {
     }
 }
 
+/// Whether an attachment becomes blocks of its own (a table or a text box) rather than inline
+/// content, decided as [`Reader::drawable`] does. Writing edits back splits paragraphs at the
+/// same places as reading.
+pub(crate) fn is_block_attachment(pkg: &iwork::Package, attachment: u64) -> bool {
+    fn is_block(pkg: &iwork::Package, id: u64, depth: u32) -> bool {
+        let Some(m) = pkg.object(id) else { return false };
+        if pkg.kind(id) == Some(kinds::TABLE_INFO) {
+            return true;
+        }
+        if IMAGE_DATA_FIELDS.iter().any(|&f| m.msg(f).and_then(|r| r.uint(1)).is_some_and(|d| pkg.has_data(d))) {
+            return false;
+        }
+        if m.field_numbers().flat_map(|f| single_refs(&m, f)).any(|r| pkg.kind(r) == Some(kinds::STORAGE)) {
+            return true;
+        }
+        depth < 5 && single_refs(&m, 2).into_iter().any(|child| is_block(pkg, child, depth + 1))
+    }
+    pkg.kind(attachment) == Some(kinds::DRAWABLE_ATTACHMENT)
+        && pkg.object(attachment).and_then(|m| m.reference(1)).is_some_and(|d| is_block(pkg, d, 0))
+}
+
 /// References in field `f` that are bare `TSP.Reference`s, not larger messages that happen to
 /// start with field 1.
-pub(super) fn single_refs(m: &Msg, f: u32) -> Vec<u64> {
+pub(crate) fn single_refs(m: &Msg, f: u32) -> Vec<u64> {
     m.msgs(f)
         .iter()
         .filter(|sub| sub.field_numbers().count() == 1)

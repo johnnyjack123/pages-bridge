@@ -48,6 +48,35 @@ Ohne vorherige Zuordnung reicht auch: `.pages`-Datei auf `pages2docxw.exe` ziehe
   - `new_copy`: Es entsteht immer eine neue nummerierte Kopie.
   - `overwrite`: Die vorhandene Datei wird ersetzt.
 
+## Zurückschreiben in die Pages-Datei (Testphase)
+
+```text
+pages2docx writeback Datei.docx                       # Änderungen in „Datei (bearbeitet).pages“ schreiben
+pages2docx writeback Datei.docx --pages Original.pages -o Ziel.pages
+```
+
+Das Programm vergleicht die bearbeitete `.docx` mit dem Original. Dann ändert es in einer **Kopie**
+der Pages-Datei nur den Fließtext, geänderte Tabellenzellen und den gespeicherten Layout-Cache.
+Alles andere bleibt Byte für Byte erhalten, und das Original wird nie angefasst. Bevor die neue
+Datei akzeptiert wird, liest das Programm sie selbst wieder ein und prüft den Text.
+
+Übernommen werden:
+
+- neuer, geänderter und gelöschter Text, neue und gelöschte Absätze
+- Aufzählungen ein und aus, die Listenebene
+- Text in Tabellenzellen, auch in bisher leeren Zellen
+- fett, kursiv, unterstrichen und durchgestrichen, soweit das Dokument dafür schon eine
+  Formatvorlage benutzt
+- Links, deren Adresse im Dokument schon vorkommt
+
+Gemeldet und nicht übernommen werden Formatierungen ohne passende Vorlage, neue Links, Bilder und
+Tabellen, Änderungen an Zeilen- und Spaltenanzahl und Änderungen in Textfeldern. Dokumente mit
+Fußnoten, Kommentaren, verfolgten Änderungen, Lesezeichen oder mehreren Abschnitten lehnt das
+Programm ab, weil das Zurückschreiben diese Inhalte zerstören würde.
+
+Ob Pages die geschriebenen Dateien öffnet, ist noch nicht auf einem Apple-Gerät geprüft. Die
+Testdateien dafür liegen in `iphone-test/`.
+
 ## Was übernommen wird
 
 - Text, Absatz- und Zeichenformate: Schrift, Größe, fett, kursiv, unterstrichen, durchgestrichen,
@@ -79,6 +108,7 @@ Standardschrift von Pages.
 | `crates/pages2docx/src/reader` | Pages → Dokumentmodell: Formatvorlagen, Text, Listen, Tabellen, Bilder |
 | `crates/pages2docx/src/model.rs` | Formatneutrales Dokumentmodell, die Schnittstelle zwischen Lesen und Schreiben |
 | `crates/pages2docx/src/docx` | Modell → `.docx`, Schriftzuordnung und Pages-Zeilenhöhen |
+| `crates/pages2docx/src/writeback` | bearbeitete `.docx` → Pages: docx lesen, Absätze abgleichen, Text und Zellen neu kodieren |
 | `crates/pages2docx/src/cli.rs`, `config.rs`, `system.rs` | Kommandozeile, Einstellungen, Windows-Anbindung |
 | `reference/` | Echte Pages-Dateien mit PDF aus Pages. Testgrundlage, nicht zum Weitergeben |
 | `prototype/` | Der erste Python-Prototyp, ersetzt durch das Rust-Programm |

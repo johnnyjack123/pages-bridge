@@ -7,16 +7,16 @@ use iwork::Msg;
 
 use super::attach::Attached;
 use super::{Ctx, Part, Reader, kinds};
-use crate::model::{Block, CharProps, Inline, InlineKind, ListItem, Paragraph};
+use crate::model::{Block, CharProps, Inline, InlineKind, ListItem, Origin, Paragraph};
 
 /// Maps Pages' UTF-16 code unit indices (it is a Cocoa app) to indices into a `char` slice.
-pub(super) struct Utf16Map {
+pub(crate) struct Utf16Map {
     map: Option<Vec<usize>>,
     len: usize,
 }
 
 impl Utf16Map {
-    pub(super) fn new(chars: &[char]) -> Self {
+    pub(crate) fn new(chars: &[char]) -> Self {
         if chars.iter().all(|c| c.len_utf16() == 1) {
             return Self { map: None, len: chars.len() };
         }
@@ -47,7 +47,7 @@ impl Utf16Map {
 
 /// A character-indexed attribute table (`TSWP.ObjectAttributeTable` and relatives): each entry
 /// holds from its index until the next entry.
-pub(super) struct AttrTable<T> {
+pub(crate) struct AttrTable<T> {
     idx: Vec<usize>,
     vals: Vec<T>,
 }
@@ -61,37 +61,42 @@ impl<T: Copy> AttrTable<T> {
         Self { idx: rows.iter().map(|r| r.0).collect(), vals: rows.into_iter().map(|r| r.1).collect() }
     }
 
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.idx.is_empty()
     }
 
-    fn at(&self, i: usize) -> Option<T> {
+    pub(crate) fn at(&self, i: usize) -> Option<T> {
         let k = self.idx.partition_point(|&x| x <= i);
         (k > 0).then(|| self.vals[k - 1])
     }
 
-    fn exact(&self, i: usize) -> Option<T> {
+    pub(crate) fn exact(&self, i: usize) -> Option<T> {
         let k = self.idx.partition_point(|&x| x < i);
         (k < self.idx.len() && self.idx[k] == i).then(|| self.vals[k])
     }
 
-    fn within(&self, lo: usize, hi: usize) -> impl Iterator<Item = usize> + '_ {
+    pub(crate) fn within(&self, lo: usize, hi: usize) -> impl Iterator<Item = usize> + '_ {
         self.idx.iter().copied().filter(move |&x| lo <= x && x < hi)
+    }
+
+    /// All values, in index order.
+    pub(crate) fn values(&self) -> &[T] {
+        &self.vals
     }
 }
 
 impl AttrTable<Option<u64>> {
-    pub(super) fn objects(m: Option<Msg>, map: &Utf16Map) -> Self {
+    pub(crate) fn objects(m: Option<Msg>, map: &Utf16Map) -> Self {
         Self::build(m, map, |e| e.reference(2))
     }
 
-    fn object_at(&self, i: usize) -> Option<u64> {
+    pub(crate) fn object_at(&self, i: usize) -> Option<u64> {
         self.at(i).flatten()
     }
 
     /// Like [`Self::object_at`], but an entry without an object continues the previous one.
     /// Paragraph style tables mark every paragraph start this way.
-    pub(super) fn at_inherit(&self, i: usize) -> Option<u64> {
+    pub(crate) fn at_inherit(&self, i: usize) -> Option<u64> {
         let mut k = self.idx.partition_point(|&x| x <= i);
         while k > 0 {
             if let Some(v) = self.vals[k - 1] {
@@ -104,7 +109,7 @@ impl AttrTable<Option<u64>> {
 }
 
 impl AttrTable<(u64, u64)> {
-    fn pairs(m: Option<Msg>, map: &Utf16Map) -> Self {
+    pub(crate) fn pairs(m: Option<Msg>, map: &Utf16Map) -> Self {
         Self::build(m, map, |e| (e.uint(2).unwrap_or(0), e.uint(3).unwrap_or(0)))
     }
 }
@@ -121,8 +126,22 @@ struct Tables {
 }
 
 /// Characters that end a paragraph; only the first two are not shown as a break.
-fn ends_paragraph(c: char) -> bool {
+pub(crate) fn ends_paragraph(c: char) -> bool {
     matches!(c, '\n' | '\u{2029}' | '\u{0C}' | '\u{04}' | '\u{0E}')
+}
+
+/// Content ranges of a storage's paragraphs: paragraph marks excluded, breaks included.
+pub(crate) fn paragraph_ranges(chars: &[char]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (i, &c) in chars.iter().enumerate() {
+        if ends_paragraph(c) {
+            out.push((start, if matches!(c, '\n' | '\u{2029}') { i } else { i + 1 }));
+            start = i + 1;
+        }
+    }
+    out.push((start, chars.len()));
+    out
 }
 
 impl Reader<'_> {
@@ -150,19 +169,22 @@ impl Reader<'_> {
             list_starts: AttrTable::pairs(st.msg(14), &map),
         };
         let mut blocks = Vec::new();
-        let mut start = 0;
-        for (i, &c) in chars.iter().enumerate() {
-            if ends_paragraph(c) {
-                let end = if matches!(c, '\n' | '\u{2029}') { i } else { i + 1 };
-                blocks.extend(self.read_paragraph(&chars, start, end, ctx, &tables));
-                start = i + 1;
-            }
+        for (index, (start, end)) in paragraph_ranges(&chars).into_iter().enumerate() {
+            let origin = Origin { storage: id, paragraph: index, piece: 0 };
+            blocks.extend(self.read_paragraph(&chars, start, end, ctx, &tables, origin));
         }
-        blocks.extend(self.read_paragraph(&chars, start, chars.len(), ctx, &tables));
         blocks
     }
 
-    fn read_paragraph(&mut self, chars: &[char], start: usize, end: usize, ctx: Ctx, t: &Tables) -> Vec<Block> {
+    fn read_paragraph(
+        &mut self,
+        chars: &[char],
+        start: usize,
+        end: usize,
+        ctx: Ctx,
+        t: &Tables,
+        origin: Origin,
+    ) -> Vec<Block> {
         let pkg = self.pkg;
         let style = t.para_styles.at_inherit(start);
         let props = self.styles.para_props(style);
@@ -238,17 +260,24 @@ impl Reader<'_> {
             push_text(pieces.last_mut().expect("pieces is never empty"), &chars[a..b], &run, link.as_ref());
         }
 
-        let make = |inlines: Vec<Inline>, list: Option<ListItem>| {
-            Block::Paragraph(Paragraph { kind, props: props.clone(), mark: mark.clone(), list, inlines })
+        let make = |inlines: Vec<Inline>, list: Option<ListItem>, piece: usize| {
+            Block::Paragraph(Paragraph {
+                kind,
+                props: props.clone(),
+                mark: mark.clone(),
+                list,
+                inlines,
+                origin: Some(Origin { piece, ..origin }),
+            })
         };
         if blocks_after.is_empty() {
-            return vec![make(pieces.pop().unwrap_or_default(), list)];
+            return vec![make(pieces.pop().unwrap_or_default(), list, 0)];
         }
         let mut out = Vec::new();
         let mut after = blocks_after.into_iter();
-        for piece in pieces {
+        for (index, piece) in pieces.into_iter().enumerate() {
             if !piece.is_empty() {
-                out.push(make(piece, list.take()));
+                out.push(make(piece, list.take(), index));
             }
             if let Some(blocks) = after.next() {
                 out.extend(blocks);

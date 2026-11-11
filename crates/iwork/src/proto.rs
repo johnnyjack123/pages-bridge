@@ -221,6 +221,108 @@ impl<'a> Msg<'a> {
     }
 }
 
+pub fn write_varint(out: &mut Vec<u8>, mut v: u64) {
+    loop {
+        let byte = (v & 0x7F) as u8;
+        v >>= 7;
+        if v == 0 {
+            out.push(byte);
+            return;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+fn write_key(out: &mut Vec<u8>, field: u32, wire_type: u8) {
+    write_varint(out, (u64::from(field) << 3) | u64::from(wire_type));
+}
+
+/// Builds a protobuf message. Fields are emitted in ascending field order on [`Encoder::finish`],
+/// as protobuf serializers do; repeated values keep the order they were added in.
+#[derive(Debug, Default, Clone)]
+pub struct Encoder {
+    fields: Vec<(u32, Vec<u8>)>,
+}
+
+impl Encoder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn raw(&mut self, field: u32, raw: &Raw) -> &mut Self {
+        let mut out = Vec::new();
+        match *raw {
+            Raw::Varint(v) => {
+                write_key(&mut out, field, 0);
+                write_varint(&mut out, v);
+            }
+            Raw::Fixed64(v) => {
+                write_key(&mut out, field, 1);
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            Raw::Bytes(b) => {
+                write_key(&mut out, field, 2);
+                write_varint(&mut out, b.len() as u64);
+                out.extend_from_slice(b);
+            }
+            Raw::Fixed32(v) => {
+                write_key(&mut out, field, 5);
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        self.fields.push((field, out));
+        self
+    }
+
+    pub fn uint(&mut self, field: u32, v: u64) -> &mut Self {
+        self.raw(field, &Raw::Varint(v))
+    }
+
+    pub fn bytes(&mut self, field: u32, b: &[u8]) -> &mut Self {
+        self.raw(field, &Raw::Bytes(b))
+    }
+
+    pub fn string(&mut self, field: u32, s: &str) -> &mut Self {
+        self.bytes(field, s.as_bytes())
+    }
+
+    pub fn float(&mut self, field: u32, v: f32) -> &mut Self {
+        self.raw(field, &Raw::Fixed32(v.to_bits()))
+    }
+
+    /// A `TSP.Reference` to object `id`.
+    pub fn reference(&mut self, field: u32, id: u64) -> &mut Self {
+        let mut r = Encoder::new();
+        r.uint(1, id);
+        self.bytes(field, &r.finish())
+    }
+
+    pub fn packed_uints(&mut self, field: u32, values: &[u64]) -> &mut Self {
+        let mut packed = Vec::new();
+        for &v in values {
+            write_varint(&mut packed, v);
+        }
+        self.bytes(field, &packed)
+    }
+
+    /// Copies every field of `msg` except those in `except`, values unchanged.
+    pub fn copy_except(&mut self, msg: &Msg, except: &[u32]) -> &mut Self {
+        for n in msg.field_numbers() {
+            if !except.contains(&n) {
+                for raw in msg.raw(n) {
+                    self.raw(n, raw);
+                }
+            }
+        }
+        self
+    }
+
+    pub fn finish(mut self) -> Vec<u8> {
+        self.fields.sort_by_key(|(n, _)| *n);
+        self.fields.into_iter().flat_map(|(_, bytes)| bytes).collect()
+    }
+}
+
 fn take<const N: usize>(buf: &[u8], pos: &mut usize) -> Result<[u8; N], DecodeError> {
     let end = pos.checked_add(N).ok_or(DecodeError("truncated field"))?;
     let bytes = buf.get(*pos..end).ok_or(DecodeError("truncated field"))?;
@@ -265,6 +367,23 @@ mod tests {
     fn rejects_truncated_data() {
         assert!(Msg::parse(&[0x12, 0x05, b'a']).is_err());
         assert!(Msg::parse(&[0x08, 0x80]).is_err());
+    }
+
+    #[test]
+    fn encoder_round_trips_and_sorts_fields() {
+        let mut e = Encoder::new();
+        e.string(2, "hi").uint(1, 150).reference(3, 7).float(4, 1.5).packed_uints(5, &[1, 300]);
+        let bytes = e.finish();
+        assert_eq!(&bytes[..3], &[0x08, 0x96, 0x01]);
+        let m = Msg::parse(&bytes).unwrap();
+        assert_eq!((m.uint(1), m.string(2).as_deref(), m.reference(3), m.float(4)), (Some(150), Some("hi"), Some(7), Some(1.5)));
+        assert_eq!(m.uints(5), vec![1, 300]);
+
+        let mut copy = Encoder::new();
+        copy.copy_except(&m, &[2]).string(2, "ho");
+        let m2_bytes = copy.finish();
+        let m2 = Msg::parse(&m2_bytes).unwrap();
+        assert_eq!((m2.string(2).as_deref(), m2.uints(5)), (Some("ho"), vec![1, 300]));
     }
 
     #[test]

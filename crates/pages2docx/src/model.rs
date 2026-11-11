@@ -170,6 +170,18 @@ pub struct Inline {
     pub link: Option<String>,
 }
 
+/// Where a paragraph came from in the source document. Writers ignore it; writing edits back
+/// uses it to find the original text again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Origin {
+    /// Object id of the text storage.
+    pub storage: u64,
+    /// Paragraph index within the storage.
+    pub paragraph: usize,
+    /// Pages keeps a table inside a paragraph; around it the paragraph becomes several pieces.
+    pub piece: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Paragraph {
     pub kind: ParaKind,
@@ -178,6 +190,28 @@ pub struct Paragraph {
     pub mark: CharProps,
     pub list: Option<ListItem>,
     pub inlines: Vec<Inline>,
+    pub origin: Option<Origin>,
+}
+
+impl Paragraph {
+    /// The paragraph's characters, with tabs, breaks and pictures as the control characters
+    /// Pages stores for them; fields are left out.
+    pub fn plain_text(&self) -> String {
+        let mut s = String::new();
+        for inline in &self.inlines {
+            match &inline.kind {
+                InlineKind::Text(t) => s.push_str(t),
+                InlineKind::Tab => s.push('\t'),
+                InlineKind::LineBreak => s.push('\u{2028}'),
+                InlineKind::PageBreak => s.push('\u{0C}'),
+                InlineKind::ColumnBreak => s.push('\u{0E}'),
+                InlineKind::SoftHyphen => s.push('\u{AD}'),
+                InlineKind::Image { .. } => s.push('\u{FFFC}'),
+                InlineKind::PageNumber => {}
+            }
+        }
+        s
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -209,6 +243,8 @@ pub struct Table {
     pub border: Option<Border>,
     /// Points: top, right, bottom, left.
     pub cell_padding: [f64; 4],
+    /// Object id of the source table (`TST.TableInfoArchive`), for writing edits back.
+    pub source: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

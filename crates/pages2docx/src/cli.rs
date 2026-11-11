@@ -35,6 +35,21 @@ enum Cmd {
     Uninstall,
     #[command(about = messages::HELP_CONFIG)]
     Config,
+    #[command(about = messages::HELP_WRITEBACK)]
+    Writeback {
+        #[arg(help = messages::HELP_WRITEBACK_DOCX)]
+        docx: PathBuf,
+        #[arg(long, help = messages::HELP_WRITEBACK_PAGES)]
+        pages: Option<PathBuf>,
+        #[arg(short, long, help = messages::HELP_OUTPUT_PAGES)]
+        output: Option<PathBuf>,
+        /// Leave Pages' cached layout and selection as they are (for testing).
+        #[arg(long, hide = true)]
+        keep_view_state: bool,
+        /// Re-encode the text even without edits (for testing the writer on its own).
+        #[arg(long, hide = true)]
+        rewrite_unchanged: bool,
+    },
 }
 
 /// Where messages go: the console, or message boxes for the windowed launcher.
@@ -74,6 +89,10 @@ pub fn run(gui: bool) -> ExitCode {
         Some(Cmd::Install) => install(&ui),
         Some(Cmd::Uninstall) => system::uninstall().map(|()| ui.info(messages::UNINSTALLED)).map_err(|e| e.to_string()),
         Some(Cmd::Config) => show_config(&ui),
+        Some(Cmd::Writeback { docx, pages, output, keep_view_state, rewrite_unchanged }) => {
+            let options = crate::writeback::Options { keep_view_state: *keep_view_state, rewrite_unchanged: *rewrite_unchanged };
+            write_back(docx, pages.as_deref(), output.as_deref(), options, &ui)
+        }
         // Files dropped onto the windowed program: open them, as a double-click would.
         None if gui => cli.files.iter().map(|f| open(f, &ui)).find(Result::is_err).unwrap_or(Ok(())),
         None => convert_files(&cli, &ui),
@@ -183,6 +202,57 @@ fn show_config(ui: &Ui) -> Result<(), String> {
         ui.info(&text);
     }
     Ok(())
+}
+
+fn write_back(
+    docx: &Path,
+    pages: Option<&Path>,
+    output: Option<&Path>,
+    options: crate::writeback::Options,
+    ui: &Ui,
+) -> Result<(), String> {
+    let pages = pages.map_or_else(|| pages_for(docx), Path::to_path_buf);
+    if !pages.is_file() {
+        return Err(messages::pages_not_found(&pages));
+    }
+    let output = output.map_or_else(|| free_name(&pages, "bearbeitet"), Path::to_path_buf);
+    let report = crate::writeback::write_back(&pages, docx, &output, options).map_err(|e| messages::describe(&e, &pages))?;
+    if report.is_unchanged() && !output.exists() {
+        ui.info(messages::NO_CHANGES);
+    } else {
+        ui.info(&messages::written_back(&output, report.paragraphs_changed, report.cells_changed));
+    }
+    if !report.not_written.is_empty() {
+        let kinds: Vec<String> = report.not_written.iter().map(|(k, n)| format!("{k} ({n})")).collect();
+        ui.info(&messages::not_written(report.not_written.values().sum(), &kinds.join(", ")));
+    }
+    Ok(())
+}
+
+/// The `.pages` a converted `.docx` belongs to: same name, without a ` (2)` the converter adds
+/// when the plain name was taken.
+fn pages_for(docx: &Path) -> PathBuf {
+    let direct = docx.with_extension("pages");
+    if direct.exists() {
+        return direct;
+    }
+    let stem = docx.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let base = stem
+        .rsplit_once(" (")
+        .filter(|(_, n)| n.strip_suffix(')').is_some_and(|n| n.chars().all(|c| c.is_ascii_digit())))
+        .map_or(stem.as_str(), |(base, _)| base);
+    docx.with_file_name(format!("{base}.pages"))
+}
+
+/// `X (label).pages` next to `file`, or `X (label 2).pages` … if that is taken.
+fn free_name(file: &Path, label: &str) -> PathBuf {
+    let stem = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let ext = file.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+    std::iter::once(format!("{stem} ({label}).{ext}"))
+        .chain((2..).map(|n| format!("{stem} ({label} {n}).{ext}")))
+        .map(|name| file.with_file_name(name))
+        .find(|candidate| !candidate.exists())
+        .expect("an unused name exists")
 }
 
 fn docx_next_to(file: &Path) -> PathBuf {

@@ -4,10 +4,10 @@
 //! documents: by changing one setting in Pages and seeing which field changed, or by matching a
 //! document's objects against Pages' own rendering of it (PDF export and preview images).
 
-mod attach;
-mod styles;
+pub(crate) mod attach;
+pub(crate) mod styles;
 mod table;
-mod text;
+pub(crate) mod text;
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -19,7 +19,7 @@ use styles::Styles;
 use text::{AttrTable, Utf16Map};
 
 /// IWA message types used by Pages.
-mod kinds {
+pub(crate) mod kinds {
     pub const DOCUMENT: u32 = 10000;
     pub const STORAGE: u32 = 2001;
     pub const DRAWABLE_ATTACHMENT: u32 = 2003;

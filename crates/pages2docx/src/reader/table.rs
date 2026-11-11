@@ -101,7 +101,8 @@ impl Reader<'_> {
             [p.float(1), p.float(2), p.float(3), p.float(4)].map(|v| v.unwrap_or(4.0))
         });
 
-        let mut table = Table { columns: widths.clone(), rows: Vec::new(), border, cell_padding: padding };
+        let mut table =
+            Table { columns: widths.clone(), rows: Vec::new(), border, cell_padding: padding, source: Some(info_id) };
         for r in (0..rows).filter(|r| !row_hidden.get(r).copied().unwrap_or(false)) {
             let is_header = r < header_rows;
             let is_footer = !is_header && r + footer_rows >= rows;
