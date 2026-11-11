@@ -10,6 +10,7 @@ mod docx;
 mod messages;
 pub mod model;
 mod reader;
+mod sync;
 mod system;
 pub mod writeback;
 

@@ -22,6 +22,18 @@ pub enum ExistingDocx {
     Overwrite,
 }
 
+/// Where the `.docx` for editing goes.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DocxLocation {
+    /// Next to the `.pages`, where the user sees it.
+    #[default]
+    NextToPages,
+    /// A private folder; removed after the editor closes when everything was written back,
+    /// so the user only ever sees the `.pages`.
+    Temp,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Config {
@@ -30,6 +42,9 @@ pub struct Config {
     /// Name → program path, or a bare `.exe` name looked up in Windows' App Paths and PATH.
     pub programs: BTreeMap<String, String>,
     pub existing_docx: ExistingDocx,
+    /// Write every save in the word processor back into the `.pages`.
+    pub write_back: bool,
+    pub docx_location: DocxLocation,
 }
 
 impl Default for Config {
@@ -39,7 +54,13 @@ impl Default for Config {
             ("word".to_owned(), "winword.exe".to_owned()),
         ]);
         let open_with = if Path::new(WORDCRAFT_DEFAULT_PATH).is_file() { "wordcraft" } else { "default" };
-        Self { open_with: open_with.to_owned(), programs, existing_docx: ExistingDocx::default() }
+        Self {
+            open_with: open_with.to_owned(),
+            programs,
+            existing_docx: ExistingDocx::default(),
+            write_back: true,
+            docx_location: DocxLocation::default(),
+        }
     }
 }
 
@@ -78,7 +99,9 @@ fn default_file(config: &Config) -> String {
             "_hinweis".to_owned(),
             serde_json::Value::String(
                 "open_with: \"wordcraft\", \"word\", \"default\" (Windows-Standardprogramm für .docx) oder Pfad zu einer \
-                 .exe. existing_docx: \"open_if_newer\", \"new_copy\" oder \"overwrite\"."
+                 .exe. existing_docx: \"open_if_newer\", \"new_copy\" oder \"overwrite\". write_back: true schreibt jedes \
+                 Speichern in die .pages zurück. docx_location: \"next_to_pages\" oder \"temp\" (die .docx bleibt \
+                 unsichtbar und wird nach dem Schließen gelöscht)."
                     .to_owned(),
             ),
         );
@@ -96,6 +119,9 @@ mod tests {
         assert_eq!(config.open_with, "word");
         assert_eq!(config.existing_docx, ExistingDocx::OpenIfNewer);
         assert!(config.programs.contains_key("wordcraft"));
+        // Settings files written before write-back existed get it switched on.
+        assert!(config.write_back);
+        assert_eq!(config.docx_location, DocxLocation::NextToPages);
         let text = default_file(&config);
         assert_eq!(serde_json::from_str::<Config>(&text).unwrap(), config);
     }

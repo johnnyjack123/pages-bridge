@@ -81,6 +81,29 @@ pub const HELP_WRITEBACK_PAGES: &str = "Die ursprüngliche .pages-Datei (Standar
 pub const HELP_OUTPUT_PAGES: &str = "Zieldatei (Standard: „Name (bearbeitet).pages“ neben dem Original)";
 pub const NO_CHANGES: &str = "Keine Änderungen gefunden, es wurde nichts geschrieben.";
 
+/// Name part of the copy write-back creates: „Name (bearbeitet).pages“.
+pub const CONFLICT_COPY_LABEL: &str = "bearbeitet";
+/// Name part of a Word file kept because not everything could be written back.
+pub const KEPT_DOCX_LABEL: &str = "Word-Fassung";
+/// Folder in the program's data folder that keeps copies of overwritten .pages files.
+pub const BACKUP_FOLDER: &str = "Sicherungen";
+
+pub fn conflict(copy: &Path) -> String {
+    format!(
+        "Die Pages-Datei wurde während der Bearbeitung woanders geändert (z. B. über iCloud).\n\
+         Damit nichts verloren geht, stehen deine Änderungen in einer eigenen Datei:\n{}",
+        copy.display()
+    )
+}
+
+pub fn session_not_written(kinds: &str) -> String {
+    format!("Nicht in die Pages-Datei übernommen: {kinds}.\nDas steht nur in der Word-Datei.")
+}
+
+pub fn kept_docx(path: &Path) -> String {
+    format!("Die Word-Datei mit allen Änderungen liegt hier:\n{}", path.display())
+}
+
 pub fn pages_not_found(path: &Path) -> String {
     format!("Die zugehörige Pages-Datei wurde nicht gefunden:\n{}\nBitte mit --pages angeben.", path.display())
 }

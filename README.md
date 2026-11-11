@@ -16,6 +16,23 @@ pages2docx uninstall                       # Doppelklick-Zuordnung wieder entfer
 pages2docx config                          # Einstellungsdatei anzeigen
 ```
 
+### Was beim Doppelklick passiert
+
+1. Die `.pages` wird in eine `.docx` umgewandelt und im eingestellten Programm geöffnet.
+2. Bei jedem Speichern schreibt pages2docx die Änderungen im Hintergrund in die `.pages` zurück.
+   Vor dem ersten Überschreiben einer Sitzung kommt eine Sicherungskopie nach
+   `%LOCALAPPDATA%\pages2docx\Sicherungen` (die neuesten 30 bleiben).
+3. Schließt du das Dokument, endet die Sitzung. Eine Meldung erscheint nur, wenn etwas nicht in die
+   `.pages` passte (siehe unten) oder schiefging.
+
+Ändert sich die `.pages` während der Bearbeitung woanders (z. B. über iCloud), wird sie nicht
+überschrieben: Deine Änderungen landen dann in `Name (bearbeitet).pages`.
+
+Wie lange ein Dokument offen ist, erkennt pages2docx am gestarteten Programm (WordCraft öffnet jedes
+Dokument in einem eigenen Prozess) oder an der Dateisperre (Word gibt Dateien an ein schon laufendes
+Word weiter und sperrt sie, solange sie offen sind). Was passiert ist, steht in
+`%LOCALAPPDATA%\pages2docx\log.txt`.
+
 `install` kopiert `pages2docx.exe` und `pages2docxw.exe` nach
 `%LOCALAPPDATA%\Programs\pages2docx` und meldet `.pages` dort an. `pages2docxw.exe` ist dasselbe
 Programm ohne Konsolenfenster: Fehler erscheinen als Meldungsfenster, und auf das Programm
@@ -44,21 +61,28 @@ Ohne vorherige Zuordnung reicht auch: `.pages`-Datei auf `pages2docxw.exe` ziehe
   gesucht (App Paths, dann `PATH`).
 - `existing_docx`: was passiert, wenn `X.docx` neben `X.pages` schon existiert:
   - `open_if_newer`: Ist sie neuer als die `.pages`, wird sie geöffnet, damit eigene Änderungen
-    nicht verloren gehen. Sonst entsteht `X (2).docx`.
+    nicht verloren gehen. Ist sie älter und stammt von pages2docx, wird sie neu erzeugt. Eine
+    ältere fremde Datei bleibt stehen, dann entsteht `X (2).docx`.
   - `new_copy`: Es entsteht immer eine neue nummerierte Kopie.
   - `overwrite`: Die vorhandene Datei wird ersetzt.
+- `write_back` (Standard `true`): Jedes Speichern wird in die `.pages` zurückgeschrieben.
+- `docx_location`: `next_to_pages` (Standard) legt die `.docx` sichtbar neben die `.pages`. Mit `temp`
+  bleibt sie unsichtbar und wird nach dem Schließen gelöscht, sodass du nur noch die `.pages`
+  siehst. Passte nicht alles in die `.pages`, bleibt sie als `X (Word-Fassung).docx` erhalten.
 
-## Zurückschreiben in die Pages-Datei (Testphase)
+## Zurückschreiben in die Pages-Datei
+
+Beim Doppelklick passiert das automatisch (siehe oben). Von Hand:
 
 ```text
 pages2docx writeback Datei.docx                       # Änderungen in „Datei (bearbeitet).pages“ schreiben
 pages2docx writeback Datei.docx --pages Original.pages -o Ziel.pages
 ```
 
-Das Programm vergleicht die bearbeitete `.docx` mit dem Original. Dann ändert es in einer **Kopie**
-der Pages-Datei nur den Fließtext, geänderte Tabellenzellen und den gespeicherten Layout-Cache.
-Alles andere bleibt Byte für Byte erhalten, und das Original wird nie angefasst. Bevor die neue
-Datei akzeptiert wird, liest das Programm sie selbst wieder ein und prüft den Text.
+Das Programm vergleicht die bearbeitete `.docx` mit der Pages-Datei. Dann ändert es nur den
+Fließtext, geänderte Tabellenzellen und den gespeicherten Layout-Cache. Alles andere bleibt Byte für
+Byte erhalten. Bevor eine neue Datei akzeptiert wird, liest das Programm sie selbst wieder ein und
+prüft den Text. Pages auf dem iPhone hat die so geschriebenen Dateien geöffnet.
 
 Übernommen werden:
 
@@ -73,9 +97,6 @@ Gemeldet und nicht übernommen werden Formatierungen ohne passende Vorlage, neue
 Tabellen, Änderungen an Zeilen- und Spaltenanzahl und Änderungen in Textfeldern. Dokumente mit
 Fußnoten, Kommentaren, verfolgten Änderungen, Lesezeichen oder mehreren Abschnitten lehnt das
 Programm ab, weil das Zurückschreiben diese Inhalte zerstören würde.
-
-Ob Pages die geschriebenen Dateien öffnet, ist noch nicht auf einem Apple-Gerät geprüft. Die
-Testdateien dafür liegen in `iphone-test/`.
 
 ## Was übernommen wird
 
@@ -109,6 +130,7 @@ Standardschrift von Pages.
 | `crates/pages2docx/src/model.rs` | Formatneutrales Dokumentmodell, die Schnittstelle zwischen Lesen und Schreiben |
 | `crates/pages2docx/src/docx` | Modell → `.docx`, Schriftzuordnung und Pages-Zeilenhöhen |
 | `crates/pages2docx/src/writeback` | bearbeitete `.docx` → Pages: docx lesen, Absätze abgleichen, Text und Zellen neu kodieren |
+| `crates/pages2docx/src/sync.rs` | die Bearbeitungssitzung: Speichern erkennen, zurückschreiben, Ende erkennen |
 | `crates/pages2docx/src/cli.rs`, `config.rs`, `system.rs` | Kommandozeile, Einstellungen, Windows-Anbindung |
 | `reference/` | Echte Pages-Dateien mit PDF aus Pages. Testgrundlage, nicht zum Weitergeben |
 | `prototype/` | Der erste Python-Prototyp, ersetzt durch das Rust-Programm |

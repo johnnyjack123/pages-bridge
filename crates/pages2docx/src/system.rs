@@ -19,10 +19,11 @@ pub(crate) enum Launcher {
     Program(PathBuf),
 }
 
-/// Opens `document` with `launcher`, without waiting for the program to exit.
-pub(crate) fn launch(launcher: &Launcher, document: &Path) -> io::Result<()> {
+/// Opens `document` with `launcher` without waiting. Returns the started process when there is
+/// one to watch; the Windows shell does not hand one out.
+pub(crate) fn launch(launcher: &Launcher, document: &Path) -> io::Result<Option<std::process::Child>> {
     match launcher {
-        Launcher::Default => shell_open(document),
+        Launcher::Default => shell_open(document).map(|()| None),
         Launcher::Program(exe) => {
             let mut cmd = Command::new(exe);
             cmd.arg(document);
@@ -32,8 +33,49 @@ pub(crate) fn launch(launcher: &Launcher, document: &Path) -> io::Result<()> {
                 const DETACHED_PROCESS: u32 = 0x0000_0008;
                 cmd.creation_flags(DETACHED_PROCESS);
             }
-            cmd.spawn().map(|_| ())
+            cmd.spawn().map(Some)
         }
+    }
+}
+
+/// Whether another program holds the file open for writing, as Word does with an open document.
+#[cfg(windows)]
+pub(crate) fn is_locked(path: &Path) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 0x1;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    // Read access shared only with readers fails while someone has write access.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)
+        .is_err_and(|e| e.raw_os_error() == Some(ERROR_SHARING_VIOLATION))
+}
+
+#[cfg(not(windows))]
+pub(crate) fn is_locked(_path: &Path) -> bool {
+    false
+}
+
+/// `%LOCALAPPDATA%\pages2docx`: backups, the log and session files.
+pub(crate) fn data_dir() -> PathBuf {
+    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    base.join("pages2docx")
+}
+
+/// Appends a line to `log.txt` in the data folder. The windowed program has no console, so this
+/// is where its sessions can be followed afterwards.
+pub(crate) fn log(line: &str) {
+    use std::io::Write as _;
+    let dir = data_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("log.txt");
+    // Keep the log from growing without bound.
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1_000_000) {
+        let _ = std::fs::rename(&path, dir.join("log.old.txt"));
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "{} [{}] {line}", crate::utc_timestamp(), std::process::id());
     }
 }
 

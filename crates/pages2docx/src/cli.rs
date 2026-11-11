@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use crate::config::{self, Config, ExistingDocx};
+use crate::config::{self, Config, DocxLocation, ExistingDocx};
 use crate::messages;
 use crate::system::{self, Launcher};
 
@@ -65,10 +65,17 @@ impl Ui {
     }
 
     fn error(&self, text: &str) {
+        self.notify(text, true);
+    }
+
+    /// Something the user must see even without a console.
+    fn notify(&self, text: &str, is_error: bool) {
         if self.gui {
-            system::message_box(text, true);
-        } else {
+            system::message_box(text, is_error);
+        } else if is_error {
             eprintln!("{text}");
+        } else {
+            println!("{text}");
         }
     }
 }
@@ -141,25 +148,103 @@ fn convert_one(file: &Path, target: &Path, ui: &Ui) -> Result<(), String> {
     Ok(())
 }
 
-/// Converts next to the `.pages` file and opens the result: what a double-click does.
+/// What a double-click does: convert, open in the chosen program, and with write-back on, keep
+/// the `.pages` in step with every save until the document is closed.
 fn open(file: &Path, ui: &Ui) -> Result<(), String> {
     let config_path = config::path();
     let config = config::load_or_create(&config_path).map_err(|why| messages::config_invalid(&config_path, &why))?;
     let launcher = resolve_launcher(&config, &config_path)?;
-    let existing = docx_next_to(file);
-    let target = match config.existing_docx {
-        ExistingDocx::Overwrite => existing,
-        ExistingDocx::OpenIfNewer if is_newer(&existing, file) => {
-            ui.info(&messages::reused(&existing));
-            return start(&launcher, &existing);
-        }
-        _ => free_docx_name(file),
+    system::log(&format!("open {}", file.display()));
+    let (docx, convert) = match config.docx_location {
+        DocxLocation::Temp => (temp_docx(file), true),
+        DocxLocation::NextToPages => choose_docx(file, config.existing_docx),
     };
-    convert_one(file, &target, ui)?;
-    start(&launcher, &target)
+    if convert {
+        if let Some(dir) = docx.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        convert_one(file, &docx, ui)?;
+    } else {
+        ui.info(&messages::reused(&docx));
+    }
+    let editor = start(&launcher, &docx)?;
+    if !config.write_back {
+        return Ok(());
+    }
+    let outcome = crate::sync::run(file, &docx, editor);
+    finish(file, &docx, config.docx_location, &outcome, ui);
+    Ok(())
 }
 
-fn start(launcher: &Launcher, document: &Path) -> Result<(), String> {
+/// The `.docx` next to `file` to open, and whether it must be converted first.
+fn choose_docx(file: &Path, policy: ExistingDocx) -> (PathBuf, bool) {
+    let existing = docx_next_to(file);
+    match policy {
+        ExistingDocx::Overwrite => (existing, true),
+        ExistingDocx::NewCopy if existing.exists() => (free_docx_name(file), true),
+        _ if !existing.exists() => (existing, true),
+        // Newer than the .pages: it may hold edits, open it as it is.
+        ExistingDocx::OpenIfNewer if is_newer(&existing, file) => (existing, false),
+        // An older conversion of ours is stale; a file from elsewhere is kept.
+        ExistingDocx::OpenIfNewer if is_converted(&existing) => (existing, true),
+        _ => (free_docx_name(file), true),
+    }
+}
+
+/// Whether `docx` was written by this converter (editors keep the document properties).
+fn is_converted(docx: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(docx) else { return false };
+    let Ok(mut archive) = zip::ZipArchive::new(file) else { return false };
+    let mut core = String::new();
+    archive
+        .by_name("docProps/core.xml")
+        .ok()
+        .and_then(|mut entry| std::io::Read::read_to_string(&mut entry, &mut core).ok())
+        .is_some_and(|_| core.contains(crate::CONVERTED_MARKER))
+}
+
+/// A private place for the `.docx`, named like the `.pages` so the editor shows that name.
+fn temp_docx(file: &Path) -> PathBuf {
+    let stem = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    system::data_dir().join("open").join(format!("{}", std::process::id())).join(format!("{stem}.docx"))
+}
+
+/// Tells the user what needs their attention after editing, and tidies up a private docx.
+fn finish(file: &Path, docx: &Path, location: DocxLocation, outcome: &crate::sync::Outcome, ui: &Ui) {
+    let mut lines = Vec::new();
+    if let Some(error) = &outcome.error {
+        lines.push(error.clone());
+    }
+    if let Some(copy) = &outcome.conflict_copy {
+        lines.push(messages::conflict(copy));
+    }
+    if !outcome.not_written.is_empty() {
+        let kinds: Vec<String> = outcome.not_written.keys().cloned().collect();
+        lines.push(messages::session_not_written(&kinds.join(", ")));
+    }
+    if location == DocxLocation::Temp {
+        let complete = outcome.error.is_none() && outcome.not_written.is_empty();
+        if complete {
+            if let Some(dir) = docx.parent() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        } else {
+            // The docx holds what the .pages could not take: move it where the user finds it.
+            let kept = crate::sync::free_name(&file.with_extension("docx"), messages::KEPT_DOCX_LABEL);
+            if std::fs::copy(docx, &kept).is_ok() {
+                lines.push(messages::kept_docx(&kept));
+                if let Some(dir) = docx.parent() {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
+            }
+        }
+    }
+    if !lines.is_empty() {
+        ui.notify(&lines.join("\n\n"), outcome.error.is_some());
+    }
+}
+
+fn start(launcher: &Launcher, document: &Path) -> Result<Option<std::process::Child>, String> {
     system::launch(launcher, document).map_err(|e| {
         let program = match launcher {
             Launcher::Program(p) => p.clone(),
@@ -215,7 +300,7 @@ fn write_back(
     if !pages.is_file() {
         return Err(messages::pages_not_found(&pages));
     }
-    let output = output.map_or_else(|| free_name(&pages, "bearbeitet"), Path::to_path_buf);
+    let output = output.map_or_else(|| crate::sync::free_name(&pages, messages::CONFLICT_COPY_LABEL), Path::to_path_buf);
     let report = crate::writeback::write_back(&pages, docx, &output, options).map_err(|e| messages::describe(&e, &pages))?;
     if report.is_unchanged() && !output.exists() {
         ui.info(messages::NO_CHANGES);
@@ -242,17 +327,6 @@ fn pages_for(docx: &Path) -> PathBuf {
         .filter(|(_, n)| n.strip_suffix(')').is_some_and(|n| n.chars().all(|c| c.is_ascii_digit())))
         .map_or(stem.as_str(), |(base, _)| base);
     docx.with_file_name(format!("{base}.pages"))
-}
-
-/// `X (label).pages` next to `file`, or `X (label 2).pages` … if that is taken.
-fn free_name(file: &Path, label: &str) -> PathBuf {
-    let stem = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let ext = file.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
-    std::iter::once(format!("{stem} ({label}).{ext}"))
-        .chain((2..).map(|n| format!("{stem} ({label} {n}).{ext}")))
-        .map(|name| file.with_file_name(name))
-        .find(|candidate| !candidate.exists())
-        .expect("an unused name exists")
 }
 
 fn docx_next_to(file: &Path) -> PathBuf {
