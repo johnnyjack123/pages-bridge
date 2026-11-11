@@ -139,6 +139,7 @@ pub const NOT_WRITTEN_TABLE: &str = "neue Tabelle";
 pub const NOT_WRITTEN_TABLE_SHAPE: &str = "geänderte Zeilen- oder Spaltenanzahl";
 pub const NOT_WRITTEN_LIST: &str = "Aufzählung ohne passenden Listenstil";
 pub const NOT_WRITTEN_CELL: &str = "Zelle mit Zahl, Datum oder formatiertem Text";
+pub const NOT_WRITTEN_CELL_AREA: &str = "Zelle außerhalb des von Pages gespeicherten Tabellenbereichs";
 pub const NOT_WRITTEN_TEXTBOX: &str = "Änderung in einem Textfeld";
 
 pub fn config_invalid(path: &Path, why: &str) -> String {

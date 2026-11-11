@@ -1,13 +1,14 @@
 //! Writing edited cell text back into Pages tables.
 //!
 //! Text cells point into the table's string list (`TST.TableDataList`, list type 1), which keeps a
-//! reference count per string. Cells live in tiles: per row a buffer of cell records plus a
-//! 16-bit offset per column (`0xFFFF` = no cell), once in the current format (fields 6/7) and once
-//! in a pre-2013 format (fields 3/4) that Pages fills with empty placeholder records.
+//! reference count per string. Cells live in tiles of up to 256 rows: per stored row a buffer of
+//! cell records plus a 16-bit offset per column (`0xFFFF` = no cell), once in the current format
+//! (fields 6/7) and once in a pre-2013 format (fields 3/4) that Pages fills with empty placeholder
+//! records. Rows without any cell are not stored at all.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use iwork::{Edits, Encoder, Package};
+use iwork::{Edits, Encoder, Msg, Package};
 
 use super::Report;
 use super::docx_in::Para as DocxPara;
@@ -21,6 +22,10 @@ const CELL_TEXT: u8 = 3;
 const NO_CELL: u16 = u16::MAX;
 /// An empty record of the pre-2013 cell format, as Pages writes for every cell.
 const LEGACY_RECORD: [u8; 12] = [4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+/// Offset slots per stored row in Pages' own files.
+const DEFAULT_SLOTS: usize = 255;
+/// The cell storage version Pages writes in field 5 of each stored row.
+const ROW_STORAGE_VERSION: u64 = 5;
 
 /// Cell text as the reader shows it: paragraphs joined by line feeds.
 fn model_cell_text(blocks: &[Block]) -> String {
@@ -72,14 +77,92 @@ fn minimal_text_cell(id: u64) -> Vec<u8> {
     cell
 }
 
-/// The cell records of one stored row, split per column.
+/// One stored row of a tile, split per column.
 struct TileRow {
-    /// Position of the row's message in the tile.
-    index: usize,
+    /// Position of the row's message in the tile; `None` for a row added here.
+    message: Option<usize>,
+    /// Row number within the tile (field 1).
+    row_in_tile: u64,
     cells: Vec<Option<Vec<u8>>>,
     legacy: Vec<Option<Vec<u8>>>,
     offset_slots: usize,
+    legacy_slots: usize,
     wide: bool,
+}
+
+struct Tile<'p> {
+    id: u64,
+    /// Table row of the tile's first row.
+    base: u64,
+    msg: Msg<'p>,
+    rows: Vec<TileRow>,
+}
+
+impl<'p> Tile<'p> {
+    fn load(pkg: &'p Package, id: u64, base: u64) -> Option<Self> {
+        let msg = pkg.object(id)?;
+        let rows = msg
+            .msgs(5)
+            .iter()
+            .enumerate()
+            .map(|(index, info)| {
+                let wide = info.bool(8).unwrap_or(false);
+                let (storage, offsets) = (info.bytes(6).unwrap_or_default(), info.bytes(7).unwrap_or_default());
+                let (legacy, legacy_offsets) = (info.bytes(3).unwrap_or_default(), info.bytes(4).unwrap_or_default());
+                TileRow {
+                    message: Some(index),
+                    row_in_tile: info.uint(1).unwrap_or(0),
+                    cells: split_cells(storage, offsets, if wide { 4 } else { 1 }),
+                    legacy: split_cells(legacy, legacy_offsets, 1),
+                    offset_slots: offsets.len() / 2,
+                    legacy_slots: legacy_offsets.len() / 2,
+                    wide,
+                }
+            })
+            .collect();
+        Some(Self { id, base, msg, rows })
+    }
+
+    /// The stored row for table row `row`, created empty if the tile has none for it yet.
+    fn row_mut(&mut self, row: u64) -> &mut TileRow {
+        let row_in_tile = row - self.base;
+        if let Some(i) = self.rows.iter().position(|r| r.row_in_tile == row_in_tile) {
+            return &mut self.rows[i];
+        }
+        let (offset_slots, legacy_slots) =
+            self.rows.first().map_or((DEFAULT_SLOTS, DEFAULT_SLOTS), |r| (r.offset_slots, r.legacy_slots));
+        let at = self.rows.partition_point(|r| r.row_in_tile < row_in_tile);
+        self.rows.insert(
+            at,
+            TileRow { message: None, row_in_tile, cells: Vec::new(), legacy: Vec::new(), offset_slots, legacy_slots, wide: false },
+        );
+        &mut self.rows[at]
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        let infos = self.msg.msgs(5);
+        let mut e = Encoder::new();
+        e.copy_except(&self.msg, &[4, 5]);
+        // Field 4 counts the rows the tile holds; Pages' own files store them without gaps.
+        e.uint(4, self.rows.iter().map(|r| r.row_in_tile + 1).max().unwrap_or(0));
+        for row in &self.rows {
+            let (storage, offsets) = join_cells(&row.cells, row.offset_slots, row.wide);
+            let (legacy, legacy_offsets) = join_cells(&row.legacy, row.legacy_slots, false);
+            let mut r = Encoder::new();
+            match row.message.and_then(|i| infos.get(i)) {
+                Some(info) => {
+                    r.copy_except(info, &[1, 2, 3, 4, 6, 7]);
+                }
+                None => {
+                    r.uint(5, ROW_STORAGE_VERSION);
+                }
+            }
+            r.uint(1, row.row_in_tile).uint(2, row.cells.iter().flatten().count() as u64);
+            r.bytes(3, &legacy).bytes(4, &legacy_offsets).bytes(6, &storage).bytes(7, &offsets);
+            e.bytes(5, &r.finish());
+        }
+        e.finish()
+    }
 }
 
 fn split_cells(storage: &[u8], offsets: &[u8], scale: usize) -> Vec<Option<Vec<u8>>> {
@@ -116,15 +199,21 @@ fn join_cells(cells: &[Option<Vec<u8>>], slots: usize, wide: bool) -> (Vec<u8>, 
     (storage, offsets)
 }
 
-/// Applies the cell edits of one table. Returns without changes when the structure differs
-/// more than write-back can follow.
-pub(crate) fn apply(
-    pkg: &Package,
-    original: &Table,
-    edited: &[Vec<Vec<DocxPara>>],
-    edits: &mut Edits,
-    report: &mut Report,
-) {
+/// Visible indices among `count` row or column headers, skipping hidden ones as the reader does.
+fn visible(pkg: &Package, buckets: &[u64], count: usize) -> Vec<usize> {
+    let mut hidden = HashMap::new();
+    for bucket in buckets.iter().filter_map(|b| pkg.object(*b)) {
+        for h in bucket.msgs(2) {
+            if let Some(i) = h.uint(1).and_then(|i| usize::try_from(i).ok()) {
+                hidden.insert(i, h.uint(3).unwrap_or(0) != 0);
+            }
+        }
+    }
+    (0..count).filter(|i| !hidden.get(i).copied().unwrap_or(false)).collect()
+}
+
+/// Applies the cell edits of one table. Objects are only replaced when a cell really changed.
+pub(crate) fn apply(pkg: &Package, original: &Table, edited: &[Vec<Vec<DocxPara>>], edits: &mut Edits, report: &mut Report) {
     let Some(info_id) = original.source else { return };
     let Some(model) = pkg.object(info_id).and_then(|i| i.reference(2)).and_then(|id| pkg.object(id)) else { return };
     let store = model.msg(4).unwrap_or_default();
@@ -141,8 +230,8 @@ pub(crate) fn apply(
             })
         })
         .collect();
-    let shape_changed = original.rows.len() != edited.len()
-        || original.rows.iter().zip(edited).any(|(r0, r1)| r0.cells.len() != r1.len());
+    let shape_changed =
+        original.rows.len() != edited.len() || original.rows.iter().zip(edited).any(|(r0, r1)| r0.cells.len() != r1.len());
     if shape_changed {
         report.skip(messages::NOT_WRITTEN_TABLE_SHAPE);
     }
@@ -150,23 +239,11 @@ pub(crate) fn apply(
         return;
     }
 
-    // Visible rows and columns map to stored indices around hidden ones, as the reader counts.
-    let visible = |bucket_ids: Vec<u64>, count: usize| -> Vec<usize> {
-        let mut hidden = HashMap::new();
-        for bucket in bucket_ids.into_iter().filter_map(|b| pkg.object(b)) {
-            for h in bucket.msgs(2) {
-                if let Some(i) = h.uint(1).and_then(|i| usize::try_from(i).ok()) {
-                    hidden.insert(i, h.uint(3).unwrap_or(0) != 0);
-                }
-            }
-        }
-        (0..count).filter(|i| !hidden.get(i).copied().unwrap_or(false)).collect()
-    };
     let to_usize = |v: Option<u64>| usize::try_from(v.unwrap_or(0)).unwrap_or(0);
     let row_buckets = store.msg(1).map(|m| m.references(2)).unwrap_or_default();
     let col_bucket = store.reference(2);
-    let rows = visible(row_buckets.clone(), to_usize(model.uint(6)));
-    let cols = visible(col_bucket.into_iter().collect(), to_usize(model.uint(7)));
+    let rows = visible(pkg, &row_buckets, to_usize(model.uint(6)));
+    let cols = visible(pkg, &col_bucket.into_iter().collect::<Vec<_>>(), to_usize(model.uint(7)));
 
     let Some(strings_id) = store
         .field_numbers()
@@ -185,58 +262,35 @@ pub(crate) fn apply(
         .collect();
     let mut next_key = strings_msg.uint(2).unwrap_or(1).max(strings.keys().max().map_or(1, |k| k + 1));
 
-    // Load the tiles.
     let tiles_msg = store.msg(3).unwrap_or_default();
     let tile_rows = tiles_msg.uint(2).filter(|s| *s > 0).unwrap_or(256);
-    let mut tiles: Vec<(u64, u64, Vec<TileRow>)> = Vec::new();
-    for entry in tiles_msg.msgs(1) {
-        let (Some(tile_id), base) = (entry.reference(2), entry.uint(1).unwrap_or(0) * tile_rows) else { continue };
-        let Some(tile) = pkg.object(tile_id) else { continue };
-        let mut rows_in_tile = Vec::new();
-        for (index, info) in tile.msgs(5).iter().enumerate() {
-            let wide = info.bool(8).unwrap_or(false);
-            let (storage, offsets) = (info.bytes(6).unwrap_or_default(), info.bytes(7).unwrap_or_default());
-            let legacy = split_cells(info.bytes(3).unwrap_or_default(), info.bytes(4).unwrap_or_default(), 1);
-            rows_in_tile.push(TileRow {
-                index,
-                cells: split_cells(storage, offsets, if wide { 4 } else { 1 }),
-                legacy,
-                offset_slots: offsets.len() / 2,
-                wide,
-            });
-        }
-        tiles.push((tile_id, base, rows_in_tile));
-    }
-    let row_number = |tile: &(u64, u64, Vec<TileRow>), row: &TileRow| -> Option<usize> {
-        let msg = pkg.object(tile.0)?;
-        let info = msg.msgs(5).into_iter().nth(row.index)?;
-        usize::try_from(tile.1 + info.uint(1).unwrap_or(0)).ok()
-    };
+    let mut tiles: Vec<Tile> = tiles_msg
+        .msgs(1)
+        .iter()
+        .filter_map(|entry| Tile::load(pkg, entry.reference(2)?, entry.uint(1).unwrap_or(0) * tile_rows))
+        .collect();
     let template = tiles
         .iter()
-        .flat_map(|(_, _, rows)| rows.iter().flat_map(|r| r.cells.iter().flatten()))
+        .flat_map(|t| t.rows.iter().flat_map(|r| r.cells.iter().flatten()))
         .find(|c| c.get(1) == Some(&CELL_TEXT) && string_id(c).is_some())
         .cloned();
 
-    let mut touched_tiles = std::collections::BTreeSet::new();
+    let mut touched: BTreeSet<usize> = BTreeSet::new();
     for (r, c, text) in changes {
         let (Some(&row), Some(&col)) = (rows.get(r), cols.get(c)) else { continue };
-        let found = tiles.iter().enumerate().find_map(|(t, tile)| {
-            tile.2.iter().position(|tr| row_number(tile, tr) == Some(row)).map(|i| (t, i))
-        });
-        let Some((t, i)) = found else {
-            report.skip(messages::NOT_WRITTEN_CELL);
+        let row = row as u64;
+        let Some(t) = tiles.iter().position(|tile| tile.base <= row && row < tile.base + tile_rows) else {
+            report.skip(messages::NOT_WRITTEN_CELL_AREA);
             continue;
         };
-        let tile_row = &mut tiles[t].2[i];
-        if tile_row.cells.len() <= col {
-            tile_row.cells.resize(col + 1, None);
+        let stored = tiles[t].row_mut(row);
+        if stored.cells.len() <= col {
+            stored.cells.resize(col + 1, None);
         }
-        if tile_row.legacy.len() <= col {
-            tile_row.legacy.resize(col + 1, None);
+        if stored.legacy.len() <= col {
+            stored.legacy.resize(col + 1, None);
         }
-        let existing = tile_row.cells[col].clone();
-        match existing {
+        match stored.cells[col].clone() {
             Some(cell) if cell.get(1) != Some(&CELL_TEXT) => {
                 report.skip(messages::NOT_WRITTEN_CELL);
                 continue;
@@ -247,14 +301,14 @@ pub(crate) fn apply(
                     old.0 = old.0.saturating_sub(1);
                 }
                 if text.is_empty() {
-                    tile_row.cells[col] = None;
-                    tile_row.legacy[col] = None;
+                    stored.cells[col] = None;
+                    stored.legacy[col] = None;
                 } else if let Some(key) = old_key.filter(|k| strings.get(k).is_some_and(|(n, _)| *n == 0)) {
                     // Only this cell used the string: change it in place.
                     strings.insert(key, (1, text));
                 } else {
                     strings.insert(next_key, (1, text));
-                    tile_row.cells[col] = Some(with_string_id(&cell, next_key));
+                    stored.cells[col] = Some(with_string_id(&cell, next_key));
                     next_key += 1;
                 }
             }
@@ -262,34 +316,22 @@ pub(crate) fn apply(
             None => {
                 strings.insert(next_key, (1, text));
                 let cell = template.as_ref().map_or_else(|| minimal_text_cell(next_key), |t| with_string_id(t, next_key));
-                tile_row.cells[col] = Some(cell);
-                tile_row.legacy[col] = Some(LEGACY_RECORD.to_vec());
+                stored.cells[col] = Some(cell);
+                stored.legacy[col] = Some(LEGACY_RECORD.to_vec());
                 next_key += 1;
             }
         }
-        touched_tiles.insert(t);
+        touched.insert(t);
         report.cells_changed += 1;
+    }
+    if touched.is_empty() {
+        return;
     }
     strings.retain(|_, (count, _)| *count > 0);
 
-    for t in touched_tiles {
-        let (tile_id, _, rows_in_tile) = &tiles[t];
-        let Some(tile) = pkg.object(*tile_id) else { continue };
-        let infos = tile.msgs(5);
-        let mut e = Encoder::new();
-        e.copy_except(&tile, &[5]);
-        for (info, row) in infos.iter().zip(rows_in_tile) {
-            let (storage, offsets) = join_cells(&row.cells, row.offset_slots, row.wide);
-            let (legacy, legacy_offsets) = join_cells(&row.legacy, info.bytes(4).map_or(0, |o| o.len() / 2), false);
-            let mut r = Encoder::new();
-            r.copy_except(info, &[2, 3, 4, 6, 7]);
-            r.uint(2, row.cells.iter().flatten().count() as u64);
-            r.bytes(3, &legacy).bytes(4, &legacy_offsets).bytes(6, &storage).bytes(7, &offsets);
-            e.bytes(5, &r.finish());
-        }
-        edits.replace_object(*tile_id, e.finish(), pkg.references(*tile_id).to_vec());
+    for &t in &touched {
+        edits.replace_object(tiles[t].id, tiles[t].encode(), pkg.references(tiles[t].id).to_vec());
     }
-
     let mut list = Encoder::new();
     list.copy_except(&strings_msg, &[2, 3]);
     list.uint(2, next_key);
@@ -299,24 +341,16 @@ pub(crate) fn apply(
         list.bytes(3, &entry.finish());
     }
     edits.replace_object(strings_id, list.finish(), pkg.references(strings_id).to_vec());
-
-    update_cell_counts(pkg, &tiles, &row_buckets, col_bucket, row_number, edits);
+    update_cell_counts(pkg, &tiles, &row_buckets, col_bucket, edits);
 }
 
 /// Keeps the per-row and per-column cell counts of the header buckets in step with the cells.
-fn update_cell_counts(
-    pkg: &Package,
-    tiles: &[(u64, u64, Vec<TileRow>)],
-    row_buckets: &[u64],
-    col_bucket: Option<u64>,
-    row_number: impl Fn(&(u64, u64, Vec<TileRow>), &TileRow) -> Option<usize>,
-    edits: &mut Edits,
-) {
+fn update_cell_counts(pkg: &Package, tiles: &[Tile], row_buckets: &[u64], col_bucket: Option<u64>, edits: &mut Edits) {
     let mut per_row: HashMap<usize, u64> = HashMap::new();
     let mut per_col: HashMap<usize, u64> = HashMap::new();
     for tile in tiles {
-        for row in &tile.2 {
-            let Some(r) = row_number(tile, row) else { continue };
+        for row in &tile.rows {
+            let Ok(r) = usize::try_from(tile.base + row.row_in_tile) else { continue };
             for (c, cell) in row.cells.iter().enumerate() {
                 if cell.is_some() {
                     *per_row.entry(r).or_default() += 1;
@@ -328,19 +362,18 @@ fn update_cell_counts(
     for (bucket_id, counts) in row_buckets.iter().map(|b| (*b, &per_row)).chain(col_bucket.map(|b| (b, &per_col))) {
         let Some(bucket) = pkg.object(bucket_id) else { continue };
         let headers = bucket.msgs(2);
-        let changed = headers.iter().any(|h| {
+        let count_of = |h: &Msg| {
             let i = h.uint(1).and_then(|i| usize::try_from(i).ok()).unwrap_or(usize::MAX);
-            h.uint(4).unwrap_or(0) != counts.get(&i).copied().unwrap_or(0)
-        });
-        if !changed {
+            counts.get(&i).copied().unwrap_or(0)
+        };
+        if headers.iter().all(|h| h.uint(4).unwrap_or(0) == count_of(h)) {
             continue;
         }
         let mut e = Encoder::new();
         e.copy_except(&bucket, &[2]);
         for h in &headers {
-            let i = h.uint(1).and_then(|i| usize::try_from(i).ok()).unwrap_or(usize::MAX);
             let mut header = Encoder::new();
-            header.copy_except(h, &[4]).uint(4, counts.get(&i).copied().unwrap_or(0));
+            header.copy_except(h, &[4]).uint(4, count_of(h));
             e.bytes(2, &header.finish());
         }
         edits.replace_object(bucket_id, e.finish(), pkg.references(bucket_id).to_vec());
