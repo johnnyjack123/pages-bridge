@@ -18,7 +18,8 @@ pages2docx config                          # Einstellungsdatei anzeigen
 
 ### Was beim Doppelklick passiert
 
-1. Die `.pages` wird in eine `.docx` umgewandelt und im eingestellten Programm geöffnet.
+1. Die `.pages` wird in eine `.docx` umgewandelt und im eingestellten Programm geöffnet. Die
+   `.docx` liegt dabei unsichtbar im Programmordner (siehe `docx_location`).
 2. Bei jedem Speichern schreibt pages2docx die Änderungen im Hintergrund in die `.pages` zurück.
    Vor dem ersten Überschreiben einer Sitzung kommt eine Sicherungskopie nach
    `%LOCALAPPDATA%\pages2docx\Sicherungen` (die neuesten 30 bleiben).
@@ -66,9 +67,10 @@ Ohne vorherige Zuordnung reicht auch: `.pages`-Datei auf `pages2docxw.exe` ziehe
   - `new_copy`: Es entsteht immer eine neue nummerierte Kopie.
   - `overwrite`: Die vorhandene Datei wird ersetzt.
 - `write_back` (Standard `true`): Jedes Speichern wird in die `.pages` zurückgeschrieben.
-- `docx_location`: `next_to_pages` (Standard) legt die `.docx` sichtbar neben die `.pages`. Mit `temp`
-  bleibt sie unsichtbar und wird nach dem Schließen gelöscht, sodass du nur noch die `.pages`
-  siehst. Passte nicht alles in die `.pages`, bleibt sie als `X (Word-Fassung).docx` erhalten.
+- `docx_location`: Mit `temp` (Standard) liegt die `.docx` unsichtbar in
+  `%LOCALAPPDATA%\pages2docx\open` und wird nach dem Schließen gelöscht, sodass du nur die `.pages`
+  siehst. Passte nicht alles in die `.pages`, bleibt sie als `X (Word-Fassung).docx` neben der
+  `.pages` erhalten. `next_to_pages` legt die `.docx` sichtbar neben die `.pages`.
 
 ## Zurückschreiben in die Pages-Datei
 

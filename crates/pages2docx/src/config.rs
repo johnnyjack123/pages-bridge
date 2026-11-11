@@ -27,10 +27,10 @@ pub enum ExistingDocx {
 #[serde(rename_all = "snake_case")]
 pub enum DocxLocation {
     /// Next to the `.pages`, where the user sees it.
-    #[default]
     NextToPages,
     /// A private folder; removed after the editor closes when everything was written back,
     /// so the user only ever sees the `.pages`.
+    #[default]
     Temp,
 }
 
@@ -100,8 +100,8 @@ fn default_file(config: &Config) -> String {
             serde_json::Value::String(
                 "open_with: \"wordcraft\", \"word\", \"default\" (Windows-Standardprogramm für .docx) oder Pfad zu einer \
                  .exe. existing_docx: \"open_if_newer\", \"new_copy\" oder \"overwrite\". write_back: true schreibt jedes \
-                 Speichern in die .pages zurück. docx_location: \"next_to_pages\" oder \"temp\" (die .docx bleibt \
-                 unsichtbar und wird nach dem Schließen gelöscht)."
+                 Speichern in die .pages zurück. docx_location: \"temp\" (die .docx bleibt unsichtbar und wird nach \
+                 dem Schließen gelöscht) oder \"next_to_pages\" (die .docx liegt sichtbar neben der .pages)."
                     .to_owned(),
             ),
         );
@@ -121,7 +121,7 @@ mod tests {
         assert!(config.programs.contains_key("wordcraft"));
         // Settings files written before write-back existed get it switched on.
         assert!(config.write_back);
-        assert_eq!(config.docx_location, DocxLocation::NextToPages);
+        assert_eq!(config.docx_location, DocxLocation::Temp);
         let text = default_file(&config);
         assert_eq!(serde_json::from_str::<Config>(&text).unwrap(), config);
     }

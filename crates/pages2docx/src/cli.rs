@@ -205,8 +205,23 @@ fn is_converted(docx: &Path) -> bool {
 
 /// A private place for the `.docx`, named like the `.pages` so the editor shows that name.
 fn temp_docx(file: &Path) -> PathBuf {
+    let open = system::data_dir().join("open");
+    remove_stale(&open);
     let stem = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    system::data_dir().join("open").join(format!("{}", std::process::id())).join(format!("{stem}.docx"))
+    open.join(format!("{}", std::process::id())).join(format!("{stem}.docx"))
+}
+
+/// Removes private `.docx` folders a crashed or killed session left behind. Only old ones: a
+/// document may stay open for days.
+fn remove_stale(open: &Path) {
+    const STALE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+    let Ok(entries) = std::fs::read_dir(open) else { return };
+    for entry in entries.flatten() {
+        let age = entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
+        if age.is_some_and(|age| age > STALE) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 /// Tells the user what needs their attention after editing, and tidies up a private docx.
