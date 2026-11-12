@@ -25,6 +25,11 @@ pub const SKIP_HEADER_IMAGE: &str = "Bild in Kopf-/Fußzeile";
 pub const SKIP_IMAGE: &str = "Bild";
 pub const SKIP_IMAGE_FORMAT: &str = "Bild in unbekanntem Format";
 
+/// Name of the Word style for a Pages style changed on some paragraphs ("Text*" in Pages).
+pub fn style_variation(base: &str, n: usize) -> String {
+    if n <= 1 { format!("{base} (geändert)") } else { format!("{base} (geändert {n})") }
+}
+
 pub const CELL_TRUE: &str = "WAHR";
 pub const CELL_FALSE: &str = "FALSCH";
 pub const CELL_ERROR: &str = "#FEHLER";
@@ -133,6 +138,7 @@ pub const CONTENT_DROP_CAPS: &str = "Initialen";
 
 // Edits write-back reports instead of carrying over.
 pub const NOT_WRITTEN_FORMAT: &str = "Formatierung ohne passende Vorlage im Dokument";
+pub const NOT_WRITTEN_PARA_STYLE: &str = "Absatz-Formatvorlage, die es im Pages-Dokument nicht gibt";
 pub const NOT_WRITTEN_LINK: &str = "neuer Link";
 pub const NOT_WRITTEN_OBJECT: &str = "neues Bild oder Objekt";
 pub const NOT_WRITTEN_TABLE: &str = "neue Tabelle";

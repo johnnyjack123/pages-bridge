@@ -189,7 +189,7 @@ impl Reader<'_> {
         let style = t.para_styles.at_inherit(start);
         let props = self.styles.para_props(style);
         let mark = self.styles.char_props(style);
-        let kind = self.styles.kind(style);
+        let offered = self.offered_style(style);
 
         let mut list = None;
         if ctx.part != Part::Header {
@@ -262,7 +262,7 @@ impl Reader<'_> {
 
         let make = |inlines: Vec<Inline>, list: Option<ListItem>, piece: usize| {
             Block::Paragraph(Paragraph {
-                kind,
+                style: offered,
                 props: props.clone(),
                 mark: mark.clone(),
                 list,

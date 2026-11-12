@@ -1,5 +1,8 @@
 //! Writes the [`model`](crate::model) as a Word document (Office Open XML, ECMA-376).
 //!
+//! Pages' paragraph styles become Word styles, and paragraphs and runs carry only what differs
+//! from their style, so that choosing another style in the word processor changes the text.
+//!
 //! Pages documents often paginate with blank lines, so page breaks only survive if lines are
 //! as tall as in Pages. Measured against Pages PDF exports, two differences need compensating:
 //!
@@ -16,7 +19,7 @@ mod fonts;
 mod numbering;
 mod xml;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::Path;
@@ -25,9 +28,10 @@ use fonts::FontMapper;
 use numbering::Numbering;
 use xml::{attr, text, twips};
 
+use crate::messages;
 use crate::model::{
-    Align, Block, Border, Caps, CharProps, Document, Float, HeaderFooter, Inline, InlineKind, LineSpacing, ParaKind,
-    ParaProps, Paragraph, Rgb, Strike, TabAlign, Table, Underline, VerticalAlign, Wrap,
+    Align, Block, Border, Caps, CharProps, Document, Float, HeaderFooter, Inline, InlineKind, LineSpacing, ParaBorder,
+    ParaKind, ParaProps, ParaStyle, Paragraph, Rgb, Strike, TabAlign, TabStop, Table, Underline, VerticalAlign, Wrap,
 };
 
 pub(crate) const NS: &str = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" \
@@ -54,18 +58,107 @@ struct Relationship {
     external: bool,
 }
 
-/// Built-in Word style for a Pages paragraph role: (style id, name, outline level).
-fn heading_style(kind: ParaKind) -> Option<(String, String, Option<u8>)> {
+/// Word's built-in style for a Pages paragraph role: (style id, name).
+fn builtin_style(kind: ParaKind) -> Option<(String, String)> {
     match kind {
         ParaKind::Normal => None,
-        ParaKind::Title => Some(("Title".into(), "Title".into(), None)),
-        ParaKind::Subtitle => Some(("Subtitle".into(), "Subtitle".into(), None)),
-        ParaKind::Heading(n) => Some((format!("Heading{n}"), format!("heading {n}"), Some(n - 1))),
+        ParaKind::Title => Some(("Title".into(), "Title".into())),
+        ParaKind::Subtitle => Some(("Subtitle".into(), "Subtitle".into())),
+        ParaKind::Heading(n) => Some((format!("Heading{n}"), format!("heading {n}"))),
     }
+}
+
+/// The style id each paragraph style of `doc` is written with. The template's body style
+/// becomes `Normal` and the first style of each heading role Word's built-in style, so that
+/// a word processor's "Heading 1" applies Pages' heading. Ids depend only on the styles, not on
+/// the text, so a document read again after write-back gets the same ones.
+pub(crate) fn style_ids(doc: &Document) -> BTreeMap<u64, String> {
+    let body = doc.para_styles.iter().find(|(_, s)| s.is_body && s.parent.is_none()).map(|(id, _)| *id);
+    let mut taken = BTreeSet::new();
+    let mut ids = BTreeMap::new();
+    for (&id, style) in &doc.para_styles {
+        let builtin = if Some(id) == body {
+            Some("Normal".to_owned())
+        } else if style.parent.is_none() {
+            builtin_style(style.kind).map(|(id, _)| id)
+        } else {
+            None
+        };
+        let style_id = builtin.filter(|b| taken.insert(b.clone())).unwrap_or_else(|| format!("Pages{id}"));
+        ids.insert(id, style_id);
+    }
+    ids
 }
 
 fn hex(c: Rgb) -> String {
     format!("{:02X}{:02X}{:02X}", c.0, c.1, c.2)
+}
+
+/// A paragraph's or paragraph style's formatting as Word sees it, with every property decided,
+/// so that a paragraph can be written as its style plus what differs.
+#[derive(Debug, Clone, PartialEq)]
+struct ParaFormat {
+    keep_next: bool,
+    keep_lines: bool,
+    page_break_before: bool,
+    widow_control: bool,
+    border: Option<ParaBorder>,
+    tabs: Vec<TabStop>,
+    before: i64,
+    after: i64,
+    /// `w:line` and `w:lineRule`.
+    line: (i64, &'static str),
+    left: i64,
+    right: i64,
+    /// Positive for a first-line indent, negative for a hanging one.
+    first: i64,
+    jc: &'static str,
+}
+
+impl Default for ParaFormat {
+    /// What the document defaults in styles.xml give.
+    fn default() -> Self {
+        Self {
+            keep_next: false,
+            keep_lines: false,
+            page_break_before: false,
+            widow_control: true,
+            border: None,
+            tabs: Vec::new(),
+            before: 0,
+            after: 0,
+            line: (240, "auto"),
+            left: 0,
+            right: 0,
+            first: 0,
+            jc: "left",
+        }
+    }
+}
+
+/// Character formatting as Word sees it; see [`ParaFormat`].
+#[derive(Debug, Clone, PartialEq)]
+struct RunFormat {
+    family: String,
+    bold: bool,
+    italic: bool,
+    caps: Caps,
+    strike: Strike,
+    color: Rgb,
+    /// Half points, positive raises the text.
+    position: i64,
+    /// Half points.
+    size: i64,
+    underline: Underline,
+    vertical: VerticalAlign,
+}
+
+/// A style as written: its id and the formatting a paragraph using it gets.
+#[derive(Debug, Clone)]
+struct StyleFormat {
+    id: Option<String>,
+    para: ParaFormat,
+    run: RunFormat,
 }
 
 struct Writer<'d> {
@@ -77,25 +170,52 @@ struct Writer<'d> {
     images: HashMap<usize, String>,
     media: Vec<(String, usize)>,
     drawing_id: u32,
-    headings: BTreeSet<(String, String, Option<u8>)>,
+    /// What the document defaults give, the base of `Normal`.
+    root: StyleFormat,
+    /// Paragraphs without a style of their own are `Normal`.
+    normal: StyleFormat,
+    styles: HashMap<u64, StyleFormat>,
+    styles_xml: String,
     /// (extra leading, descent) of body lines in 1/100 pt → number of paragraphs.
     line_stats: HashMap<(i64, i64), usize>,
 }
 
 /// Writes `doc` to `path`, replacing an existing file only once the new one is complete.
 pub(crate) fn write(doc: &Document, path: &Path) -> std::io::Result<()> {
+    let mut fonts = FontMapper::new();
+    let defaults = &doc.defaults;
+    let family = defaults.font.as_deref().map_or_else(|| "Arial".to_owned(), |f| fonts.resolve(f).family);
+    #[allow(clippy::cast_possible_truncation)]
+    let size = (defaults.size.unwrap_or(11.0) * 2.0).round() as i64;
+    let root_run = RunFormat {
+        family,
+        bold: false,
+        italic: false,
+        caps: Caps::None,
+        strike: Strike::None,
+        color: Rgb(0, 0, 0),
+        position: 0,
+        size,
+        underline: Underline::None,
+        vertical: VerticalAlign::Baseline,
+    };
+    let root = StyleFormat { id: None, para: ParaFormat::default(), run: root_run };
     let mut writer = Writer {
         doc,
-        fonts: FontMapper::new(),
+        fonts,
         numbering: Numbering::new(),
         rels: Vec::new(),
         links: HashMap::new(),
         images: HashMap::new(),
         media: Vec::new(),
         drawing_id: 0,
-        headings: BTreeSet::new(),
+        normal: root.clone(),
+        root,
+        styles: HashMap::new(),
+        styles_xml: String::new(),
         line_stats: HashMap::new(),
     };
+    writer.prepare_styles();
     let parts = writer.parts();
     let tmp = path.with_extension("docx.tmp");
     write_zip(&tmp, &parts)?;
@@ -203,9 +323,30 @@ impl Writer<'_> {
     }
 
     fn paragraph(&mut self, p: &Paragraph, part: Part, align: Option<&'static str>, out: &mut String) {
+        let style = p.style.and_then(|id| self.styles.get(&id)).unwrap_or(&self.normal).clone();
+        let (mut format, line_key) = self.para_format(&p.props, &p.mark);
+        if let (Part::Body, Some(key)) = (part, line_key) {
+            *self.line_stats.entry(key).or_default() += 1;
+        }
+        if let Some(jc) = align {
+            format.jc = jc;
+        }
+        let mut numbering = String::new();
+        if let Some(item) = p.list.filter(|_| part != Part::Header) {
+            // The list level supplies the indentation; any written here would override it.
+            (format.left, format.right, format.first) = (style.para.left, style.para.right, style.para.first);
+            let id = self.numbering.num_id(item.style, item.restart);
+            numbering = format!("<w:numPr><w:ilvl w:val=\"{}\"/><w:numId w:val=\"{id}\"/></w:numPr>", item.level);
+        }
+        let mark = self.run_format(&p.mark);
+        let mut ppr = String::new();
+        if let Some(id) = &style.id {
+            let _ = write!(ppr, "<w:pStyle w:val=\"{id}\"/>");
+        }
+        ppr.push_str(&ppr_diff(&format, &style.para, &numbering, None));
+        ppr.push_str(&wrapped("rPr", &rpr_diff(&mark, &style.run)));
         out.push_str("<w:p>");
-        let ppr = self.ppr(p, part, align);
-        out.push_str(&ppr);
+        out.push_str(&wrapped("pPr", &ppr));
         let mut i = 0;
         while i < p.inlines.len() {
             let link = p.inlines[i].link.as_deref();
@@ -215,13 +356,13 @@ impl Writer<'_> {
                     let id = self.hyperlink(url);
                     let _ = write!(out, "<w:hyperlink r:id=\"{id}\" w:history=\"1\">");
                     for inline in &p.inlines[i..end] {
-                        self.run(inline, part, out);
+                        self.run(inline, part, &style.run, out);
                     }
                     out.push_str("</w:hyperlink>");
                 }
                 None => {
                     for inline in &p.inlines[i..end] {
-                        self.run(inline, part, out);
+                        self.run(inline, part, &style.run, out);
                     }
                 }
             }
@@ -239,8 +380,9 @@ impl Writer<'_> {
         id
     }
 
-    fn run(&mut self, inline: &Inline, part: Part, out: &mut String) {
-        let rpr = self.rpr(&inline.props);
+    fn run(&mut self, inline: &Inline, part: Part, base: &RunFormat, out: &mut String) {
+        let format = self.run_format(&inline.props);
+        let rpr = wrapped("rPr", &rpr_diff(&format, base));
         let content = match &inline.kind {
             InlineKind::Text(t) => format!("<w:t xml:space=\"preserve\">{}</w:t>", text(t)),
             InlineKind::Tab => "<w:tab/>".into(),
@@ -262,164 +404,77 @@ impl Writer<'_> {
         let _ = write!(out, "<w:r>{rpr}{content}</w:r>");
     }
 
-    fn rpr(&mut self, c: &CharProps) -> String {
-        let mut s = String::new();
-        let (mut bold, mut italic) = (c.bold.unwrap_or(false), c.italic.unwrap_or(false));
+    fn run_format(&mut self, c: &CharProps) -> RunFormat {
+        let (mut family, mut bold, mut italic) = (self.root.run.family.clone(), c.bold.unwrap_or(false), c.italic.unwrap_or(false));
         if let Some(font) = &c.font {
             let info = self.fonts.resolve(font);
             bold |= info.implies_bold;
             italic |= info.implies_italic;
-            let f = attr(&info.family);
-            let _ = write!(s, "<w:rFonts w:ascii=\"{f}\" w:hAnsi=\"{f}\" w:cs=\"{f}\" w:eastAsia=\"{f}\"/>");
+            family = info.family;
         }
-        if bold {
-            s.push_str("<w:b/><w:bCs/>");
+        #[allow(clippy::cast_possible_truncation)]
+        let half_points = |pt: f64| (pt * 2.0).round() as i64;
+        RunFormat {
+            family,
+            bold,
+            italic,
+            caps: c.caps.unwrap_or(Caps::None),
+            strike: c.strike.unwrap_or(Strike::None),
+            color: c.color.unwrap_or(Rgb(0, 0, 0)),
+            position: c.baseline_shift.filter(|v| v.abs() >= 0.25).map_or(0, half_points),
+            size: c.size.map_or(self.root.run.size, half_points),
+            underline: c.underline.unwrap_or(Underline::None),
+            vertical: c.vertical.unwrap_or(VerticalAlign::Baseline),
         }
-        if italic {
-            s.push_str("<w:i/><w:iCs/>");
-        }
-        match c.caps {
-            Some(Caps::All) => s.push_str("<w:caps/>"),
-            Some(Caps::Small) => s.push_str("<w:smallCaps/>"),
-            _ => {}
-        }
-        match c.strike {
-            Some(Strike::Single) => s.push_str("<w:strike/>"),
-            Some(Strike::Double) => s.push_str("<w:dstrike/>"),
-            _ => {}
-        }
-        if let Some(color) = c.color.filter(|c| *c != Rgb(0, 0, 0)) {
-            let _ = write!(s, "<w:color w:val=\"{}\"/>", hex(color));
-        }
-        if let Some(shift) = c.baseline_shift.filter(|v| v.abs() >= 0.25) {
-            #[allow(clippy::cast_possible_truncation)]
-            let half_points = (shift * 2.0).round() as i64;
-            let _ = write!(s, "<w:position w:val=\"{half_points}\"/>");
-        }
-        if let Some(size) = c.size {
-            #[allow(clippy::cast_possible_truncation)]
-            let half_points = (size * 2.0).round() as i64;
-            let _ = write!(s, "<w:sz w:val=\"{half_points}\"/><w:szCs w:val=\"{half_points}\"/>");
-        }
-        match c.underline {
-            Some(Underline::Single) => s.push_str("<w:u w:val=\"single\"/>"),
-            Some(Underline::Double) => s.push_str("<w:u w:val=\"double\"/>"),
-            _ => {}
-        }
-        match c.vertical {
-            Some(VerticalAlign::Super) => s.push_str("<w:vertAlign w:val=\"superscript\"/>"),
-            Some(VerticalAlign::Sub) => s.push_str("<w:vertAlign w:val=\"subscript\"/>"),
-            _ => {}
-        }
-        if s.is_empty() { s } else { format!("<w:rPr>{s}</w:rPr>") }
     }
 
-    fn ppr(&mut self, p: &Paragraph, part: Part, align: Option<&'static str>) -> String {
-        let props = &p.props;
-        let mut s = String::new();
-        if let Some(style) = heading_style(p.kind) {
-            let _ = write!(s, "<w:pStyle w:val=\"{}\"/>", style.0);
-            self.headings.insert(style);
-        }
-        if props.keep_with_next == Some(true) {
-            s.push_str("<w:keepNext/>");
-        }
-        if props.keep_lines == Some(true) {
-            s.push_str("<w:keepLines/>");
-        }
-        if props.page_break_before == Some(true) {
-            s.push_str("<w:pageBreakBefore/>");
-        }
-        if props.widow_control == Some(false) {
-            s.push_str("<w:widowControl w:val=\"0\"/>");
-        }
-        let list = p.list.filter(|_| part != Part::Header);
-        if let Some(item) = list {
-            let id = self.numbering.num_id(item.style, item.restart);
-            let _ = write!(s, "<w:numPr><w:ilvl w:val=\"{}\"/><w:numId w:val=\"{id}\"/></w:numPr>", item.level);
-        }
-        if let Some(border) = props.border {
-            #[allow(clippy::cast_possible_truncation)]
-            let size = ((border.width * 8.0).round() as i64).clamp(2, 96);
-            let line = |side: &str| {
-                format!("<w:{side} w:val=\"single\" w:sz=\"{size}\" w:space=\"4\" w:color=\"{}\"/>", hex(border.color))
-            };
-            s.push_str("<w:pBdr>");
-            if border.top {
-                s.push_str(&line("top"));
-            }
-            if border.bottom {
-                s.push_str(&line("bottom"));
-            }
-            s.push_str("</w:pBdr>");
-        }
-        if let Some(tabs) = props.tabs.as_ref().filter(|t| !t.is_empty()) {
-            s.push_str("<w:tabs>");
-            for tab in tabs {
-                let val = match tab.align {
-                    TabAlign::Left => "left",
-                    TabAlign::Center => "center",
-                    TabAlign::Right => "right",
-                    TabAlign::Decimal => "decimal",
-                };
-                let _ = write!(s, "<w:tab w:val=\"{val}\" w:pos=\"{}\"/>", twips(tab.position));
-            }
-            s.push_str("</w:tabs>");
-        }
-        s.push_str(&self.spacing(props, &p.mark, part));
-        if list.is_none() {
-            s.push_str(&indentation(props));
-        }
-        let jc = match align {
-            Some("left") => None,
-            Some(a) => Some(a),
-            None => match props.align {
-                Some(Align::Right) => Some("right"),
-                Some(Align::Center) => Some("center"),
-                Some(Align::Justify) => Some("both"),
-                _ => None,
+    /// The paragraph formatting, and for lines measured like Pages the (extra leading, descent)
+    /// key of the margin compensation.
+    fn para_format(&mut self, props: &ParaProps, mark: &CharProps) -> (ParaFormat, Option<(i64, i64)>) {
+        let (line, line_key) = self.line(props, mark);
+        let positive = |v: Option<f64>| v.filter(|v| *v > 0.0).map_or(0, twips);
+        let format = ParaFormat {
+            keep_next: props.keep_with_next == Some(true),
+            keep_lines: props.keep_lines == Some(true),
+            page_break_before: props.page_break_before == Some(true),
+            widow_control: props.widow_control != Some(false),
+            border: props.border,
+            tabs: props.tabs.clone().unwrap_or_default(),
+            before: positive(props.space_before),
+            after: positive(props.space_after),
+            line,
+            left: props.left_indent.map_or(0, twips),
+            right: props.right_indent.map_or(0, twips),
+            first: props.first_indent.map_or(0, twips),
+            jc: match props.align {
+                Some(Align::Right) => "right",
+                Some(Align::Center) => "center",
+                Some(Align::Justify) => "both",
+                _ => "left",
             },
         };
-        if let Some(jc) = jc {
-            let _ = write!(s, "<w:jc w:val=\"{jc}\"/>");
-        }
-        s.push_str(&self.rpr(&p.mark));
-        if s.is_empty() { s } else { format!("<w:pPr>{s}</w:pPr>") }
+        (format, line_key)
     }
 
-    fn spacing(&mut self, props: &ParaProps, mark: &CharProps, part: Part) -> String {
-        let mut attrs = Vec::new();
-        if let Some(before) = props.space_before.filter(|v| *v > 0.0) {
-            attrs.push(format!("w:before=\"{}\"", twips(before)));
-        }
-        if let Some(after) = props.space_after.filter(|v| *v > 0.0) {
-            attrs.push(format!("w:after=\"{}\"", twips(after)));
-        }
+    fn line(&mut self, props: &ParaProps, mark: &CharProps) -> ((i64, &'static str), Option<(i64, i64)>) {
         let size = mark.size.unwrap_or(11.0);
         match props.line_spacing.unwrap_or(LineSpacing::Relative(1.0)) {
             LineSpacing::Relative(amount) => match self.fonts.pages_line(mark.font.as_deref(), size, mark.is_bold()) {
                 Some(line) => {
                     // "At least" still lets a large picture or font in the line grow it.
                     let rule = if amount >= 1.0 { "atLeast" } else { "exact" };
-                    attrs.push(format!("w:line=\"{}\" w:lineRule=\"{rule}\"", twips(amount * line.height)));
-                    if part == Part::Body {
-                        #[allow(clippy::cast_possible_truncation)]
-                        let key = (((amount - 1.0).max(0.0) * line.height * 100.0).round() as i64, (line.descent * 100.0).round() as i64);
-                        *self.line_stats.entry(key).or_default() += 1;
-                    }
-                }
-                None if props.line_spacing.is_some() => {
                     #[allow(clippy::cast_possible_truncation)]
-                    let line = (240.0 * amount).round() as i64;
-                    attrs.push(format!("w:line=\"{line}\" w:lineRule=\"auto\""));
+                    let key = (((amount - 1.0).max(0.0) * line.height * 100.0).round() as i64, (line.descent * 100.0).round() as i64);
+                    ((twips(amount * line.height), rule), Some(key))
                 }
-                None => {}
+                #[allow(clippy::cast_possible_truncation)]
+                None if props.line_spacing.is_some() => (((240.0 * amount).round() as i64, "auto"), None),
+                None => ((240, "auto"), None),
             },
-            LineSpacing::AtLeast(v) => attrs.push(format!("w:line=\"{}\" w:lineRule=\"atLeast\"", twips(v))),
-            LineSpacing::Exactly(v) => attrs.push(format!("w:line=\"{}\" w:lineRule=\"exact\"", twips(v))),
-            LineSpacing::Between(v) => attrs.push(format!("w:line=\"{}\" w:lineRule=\"atLeast\"", twips(size * 1.2 + v))),
+            LineSpacing::AtLeast(v) => ((twips(v), "atLeast"), None),
+            LineSpacing::Exactly(v) => ((twips(v), "exact"), None),
+            LineSpacing::Between(v) => ((twips(size * 1.2 + v), "atLeast"), None),
         }
-        if attrs.is_empty() { String::new() } else { format!("<w:spacing {}/>", attrs.join(" ")) }
     }
 
     fn table(&mut self, t: &Table, out: &mut String) {
@@ -551,6 +606,7 @@ impl Writer<'_> {
         } else {
             // Several fields: one line with a centre and a right tab stop, as Pages lays them out.
             let width = self.doc.page.text_width();
+            let base = self.normal.run.clone();
             let mut runs = String::new();
             for (i, blocks) in fields.iter().enumerate() {
                 if i > 0 {
@@ -558,7 +614,7 @@ impl Writer<'_> {
                 }
                 if let Some(Block::Paragraph(p)) = blocks.first() {
                     for inline in &p.inlines {
-                        self.run(inline, Part::Header, &mut runs);
+                        self.run(inline, Part::Header, &base, &mut runs);
                     }
                 }
             }
@@ -572,51 +628,311 @@ impl Writer<'_> {
         format!("{XML_DECL}<w:{root} {NS}>{body}</w:{root}>")
     }
 
-    fn styles_xml(&mut self) -> String {
-        let defaults = &self.doc.defaults;
-        let family = attr(&defaults.font.as_deref().map_or_else(|| "Arial".to_owned(), |f| self.fonts.resolve(f).family));
-        #[allow(clippy::cast_possible_truncation)]
-        let size = (defaults.size.unwrap_or(11.0) * 2.0).round() as i64;
-        let mut styles = String::from(
-            "<w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\"><w:name w:val=\"Normal\"/><w:qFormat/></w:style>\
-             <w:style w:type=\"character\" w:default=\"1\" w:styleId=\"DefaultParagraphFont\"><w:name w:val=\"Default Paragraph Font\"/>\
+    /// Works out every paragraph style's formatting and writes the style definitions.
+    ///
+    /// Paragraphs then name their style and carry only what differs from it, so that applying
+    /// another style in a word processor changes how they look.
+    fn prepare_styles(&mut self) {
+        let doc = self.doc;
+        let ids = style_ids(doc);
+        let used = used_styles(doc);
+        let normal_id = ids.iter().find(|(_, s)| s.as_str() == "Normal").map(|(id, _)| *id);
+        if let Some(id) = normal_id {
+            self.normal = self.style_format("Normal", &doc.para_styles[&id]);
+            self.styles.insert(id, self.normal.clone());
+        }
+        let root = self.root.clone();
+        let mut xml = style_xml("Normal", "Normal", None, true, None, &self.normal, &root);
+        xml.push_str(
+            "<w:style w:type=\"character\" w:default=\"1\" w:styleId=\"DefaultParagraphFont\"><w:name w:val=\"Default Paragraph Font\"/>\
              <w:uiPriority w:val=\"1\"/><w:semiHidden/></w:style>\
              <w:style w:type=\"table\" w:default=\"1\" w:styleId=\"TableNormal\"><w:name w:val=\"Normal Table\"/><w:tblPr>\
              <w:tblInd w:w=\"0\" w:type=\"dxa\"/><w:tblCellMar><w:top w:w=\"0\" w:type=\"dxa\"/><w:left w:w=\"108\" w:type=\"dxa\"/>\
              <w:bottom w:w=\"0\" w:type=\"dxa\"/><w:right w:w=\"108\" w:type=\"dxa\"/></w:tblCellMar></w:tblPr></w:style>",
         );
-        // Heading styles carry only their role; the look comes from direct formatting.
-        for (id, name, outline) in &self.headings {
-            let level = outline.map(|l| format!("<w:outlineLvl w:val=\"{l}\"/>")).unwrap_or_default();
-            let _ = write!(
-                styles,
-                "<w:style w:type=\"paragraph\" w:styleId=\"{id}\"><w:name w:val=\"{name}\"/><w:basedOn w:val=\"Normal\"/>\
-                 <w:next w:val=\"Normal\"/><w:qFormat/><w:pPr><w:keepNext/>{level}</w:pPr></w:style>"
-            );
+        let mut names = reserved_names();
+        // Word also knows its built-in styles by their names in the user's language, and a
+        // second style called like that collides with them: in German Word, Pages' caption
+        // style "Untertitel" became the subtitle. Pages names its styles in the same language.
+        for (id, style) in &doc.para_styles {
+            if ids[id] == "Normal" || builtin_style(style.kind).is_some_and(|(b, _)| b == ids[id]) {
+                names.extend(style.name.as_ref().map(|n| n.to_lowercase()));
+            }
         }
+        let mut variations: HashMap<u64, usize> = HashMap::new();
+        // Parents before their variations, which are written as changes of them.
+        let mut order: Vec<u64> = ids.keys().copied().filter(|id| Some(*id) != normal_id).collect();
+        order.sort_by_key(|id| (ancestors(doc, *id).count(), *id));
+        for id in order {
+            let style = &doc.para_styles[&id];
+            let style_id = ids[&id].clone();
+            let parent = style.parent.and_then(|p| self.styles.get(&p)).cloned();
+            let base = parent.clone().unwrap_or_else(|| self.normal.clone());
+            let based_on = parent.and_then(|p| p.id).unwrap_or_else(|| "Normal".to_owned());
+            let builtin = builtin_style(style.kind).filter(|(builtin_id, _)| *builtin_id == style_id).map(|(_, name)| name);
+            let wanted = match (&builtin, &style.name, style.parent) {
+                (Some(name), ..) | (None, Some(name), _) => name.clone(),
+                (None, None, Some(parent)) => {
+                    let n = variations.entry(parent).or_default();
+                    *n += 1;
+                    messages::style_variation(&display_name(doc, &ids, parent), *n)
+                }
+                (None, None, None) => style_id.clone(),
+            };
+            // Built-in styles keep their exact names, which are reserved for them.
+            let name = if builtin.is_some() { wanted } else { unique_name(&mut names, wanted) };
+            let format = self.style_format(&style_id, style);
+            let outline = match (style.kind, style.parent) {
+                (ParaKind::Heading(n), None) => Some(n - 1),
+                _ => None,
+            };
+            let quick = builtin.is_some() || (style.name.is_some() && used.contains(&id));
+            xml.push_str(&style_xml(&style_id, &name, Some(&based_on), quick, outline, &format, &base));
+            self.styles.insert(id, format);
+        }
+        self.styles_xml = xml;
+    }
+
+    fn style_format(&mut self, id: &str, style: &ParaStyle) -> StyleFormat {
+        StyleFormat {
+            id: Some(id.to_owned()),
+            para: self.para_format(&style.props, &style.chars).0,
+            run: self.run_format(&style.chars),
+        }
+    }
+
+    fn styles_xml(&self) -> String {
+        let root = &self.root.run;
+        let family = attr(&root.family);
+        let size = root.size;
         format!(
             "{XML_DECL}<w:styles {NS}><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii=\"{family}\" w:hAnsi=\"{family}\" \
              w:cs=\"{family}\" w:eastAsia=\"{family}\"/><w:sz w:val=\"{size}\"/><w:szCs w:val=\"{size}\"/></w:rPr></w:rPrDefault>\
              <w:pPrDefault><w:pPr><w:widowControl/><w:spacing w:after=\"0\" w:line=\"240\" w:lineRule=\"auto\"/></w:pPr>\
-             </w:pPrDefault></w:docDefaults>{styles}</w:styles>"
+             </w:pPrDefault></w:docDefaults>{}</w:styles>",
+            self.styles_xml
         )
     }
 }
 
-fn indentation(props: &ParaProps) -> String {
-    let mut attrs = Vec::new();
-    if let Some(left) = props.left_indent.filter(|v| *v != 0.0) {
-        attrs.push(format!("w:left=\"{}\"", twips(left)));
+/// The paragraph styles some paragraph uses.
+fn used_styles(doc: &Document) -> HashSet<u64> {
+    fn walk(blocks: &[Block], out: &mut HashSet<u64>) {
+        for block in blocks {
+            match block {
+                Block::Paragraph(p) => out.extend(p.style),
+                Block::Table(t) => t.rows.iter().flat_map(|r| &r.cells).for_each(|c| walk(&c.blocks, out)),
+            }
+        }
     }
-    if let Some(right) = props.right_indent.filter(|v| *v != 0.0) {
-        attrs.push(format!("w:right=\"{}\"", twips(right)));
+    let mut out = HashSet::new();
+    walk(&doc.body, &mut out);
+    for hf in doc.header.iter().chain(&doc.footer) {
+        for field in [&hf.left, &hf.center, &hf.right] {
+            walk(field, &mut out);
+        }
     }
-    match props.first_indent {
-        Some(first) if first > 0.0 => attrs.push(format!("w:firstLine=\"{}\"", twips(first))),
-        Some(first) if first < 0.0 => attrs.push(format!("w:hanging=\"{}\"", twips(-first))),
-        _ => {}
+    out
+}
+
+/// The styles a style varies, nearest first.
+fn ancestors(doc: &Document, id: u64) -> impl Iterator<Item = u64> + '_ {
+    std::iter::successors(doc.para_styles.get(&id).and_then(|s| s.parent), |p| doc.para_styles.get(p).and_then(|s| s.parent))
+        .take(32)
+}
+
+/// The name a variation of `id` is called after: the Pages name of the nearest named style.
+fn display_name(doc: &Document, ids: &BTreeMap<u64, String>, id: u64) -> String {
+    std::iter::once(id)
+        .chain(ancestors(doc, id))
+        .find_map(|a| doc.para_styles.get(&a).and_then(|s| s.name.clone()))
+        .unwrap_or_else(|| ids.get(&id).cloned().unwrap_or_default())
+}
+
+/// Names of the styles this writer defines as Word's own, in English and German, lowercase.
+fn reserved_names() -> HashSet<String> {
+    let mut names: HashSet<String> =
+        ["normal", "default paragraph font", "normal table", "title", "subtitle", "standard", "titel", "untertitel"]
+            .map(str::to_owned)
+            .into();
+    for n in 1..=9 {
+        names.extend([format!("heading {n}"), format!("überschrift {n}")]);
     }
-    if attrs.is_empty() { String::new() } else { format!("<w:ind {}/>", attrs.join(" ")) }
+    names
+}
+
+/// Word needs style names to be unique, ignoring case.
+fn unique_name(taken: &mut HashSet<String>, wanted: String) -> String {
+    let mut name = wanted.clone();
+    let mut n = 2;
+    while !taken.insert(name.to_lowercase()) {
+        name = format!("{wanted} {n}");
+        n += 1;
+    }
+    name
+}
+
+fn style_xml(
+    id: &str,
+    name: &str,
+    based_on: Option<&str>,
+    quick: bool,
+    outline: Option<u8>,
+    format: &StyleFormat,
+    base: &StyleFormat,
+) -> String {
+    let default = if id == "Normal" { " w:default=\"1\"" } else { "" };
+    let mut s = format!("<w:style w:type=\"paragraph\"{default} w:styleId=\"{}\"><w:name w:val=\"{}\"/>", attr(id), attr(name));
+    if let Some(based_on) = based_on {
+        let _ = write!(s, "<w:basedOn w:val=\"{}\"/>", attr(based_on));
+    }
+    if outline.is_some() || matches!(id, "Title" | "Subtitle") {
+        s.push_str("<w:next w:val=\"Normal\"/>");
+    }
+    if quick {
+        s.push_str("<w:qFormat/>");
+    }
+    s.push_str(&wrapped("pPr", &ppr_diff(&format.para, &base.para, "", outline)));
+    s.push_str(&wrapped("rPr", &rpr_diff(&format.run, &base.run)));
+    s.push_str("</w:style>");
+    s
+}
+
+fn wrapped(tag: &str, inner: &str) -> String {
+    if inner.is_empty() { String::new() } else { format!("<w:{tag}>{inner}</w:{tag}>") }
+}
+
+/// The `w:pPr` content that turns `base` into `p`, in the schema's element order.
+fn ppr_diff(p: &ParaFormat, base: &ParaFormat, numbering: &str, outline: Option<u8>) -> String {
+    let mut s = String::new();
+    let mut flag = |name: &str, on: bool, was: bool| {
+        if on != was {
+            let _ = if on { write!(s, "<w:{name}/>") } else { write!(s, "<w:{name} w:val=\"0\"/>") };
+        }
+    };
+    flag("keepNext", p.keep_next, base.keep_next);
+    flag("keepLines", p.keep_lines, base.keep_lines);
+    flag("pageBreakBefore", p.page_break_before, base.page_break_before);
+    flag("widowControl", p.widow_control, base.widow_control);
+    s.push_str(numbering);
+    if p.border != base.border {
+        let sides = |b: Option<ParaBorder>| [("top", b.is_some_and(|b| b.top)), ("bottom", b.is_some_and(|b| b.bottom))];
+        let mut border = String::new();
+        for ((side, drawn), (_, was_drawn)) in sides(p.border).into_iter().zip(sides(base.border)) {
+            match p.border.filter(|_| drawn) {
+                Some(b) => {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let size = ((b.width * 8.0).round() as i64).clamp(2, 96);
+                    let _ = write!(border, "<w:{side} w:val=\"single\" w:sz=\"{size}\" w:space=\"4\" w:color=\"{}\"/>", hex(b.color));
+                }
+                None if was_drawn => {
+                    let _ = write!(border, "<w:{side} w:val=\"nil\"/>");
+                }
+                None => {}
+            }
+        }
+        s.push_str(&wrapped("pBdr", &border));
+    }
+    if p.tabs != base.tabs {
+        // Word adds a paragraph's tab stops to its style's; Pages replaces them.
+        let mut tabs = String::new();
+        for tab in &base.tabs {
+            if !p.tabs.iter().any(|t| twips(t.position) == twips(tab.position)) {
+                let _ = write!(tabs, "<w:tab w:val=\"clear\" w:pos=\"{}\"/>", twips(tab.position));
+            }
+        }
+        for tab in p.tabs.iter().filter(|t| !base.tabs.contains(t)) {
+            let val = match tab.align {
+                TabAlign::Left => "left",
+                TabAlign::Center => "center",
+                TabAlign::Right => "right",
+                TabAlign::Decimal => "decimal",
+            };
+            let _ = write!(tabs, "<w:tab w:val=\"{val}\" w:pos=\"{}\"/>", twips(tab.position));
+        }
+        s.push_str(&wrapped("tabs", &tabs));
+    }
+    let mut spacing = Vec::new();
+    if p.before != base.before {
+        spacing.push(format!("w:before=\"{}\"", p.before));
+    }
+    if p.after != base.after {
+        spacing.push(format!("w:after=\"{}\"", p.after));
+    }
+    if p.line != base.line {
+        spacing.push(format!("w:line=\"{}\" w:lineRule=\"{}\"", p.line.0, p.line.1));
+    }
+    if !spacing.is_empty() {
+        let _ = write!(s, "<w:spacing {}/>", spacing.join(" "));
+    }
+    let mut ind = Vec::new();
+    if p.left != base.left {
+        ind.push(format!("w:left=\"{}\"", p.left));
+    }
+    if p.right != base.right {
+        ind.push(format!("w:right=\"{}\"", p.right));
+    }
+    if p.first != base.first {
+        ind.push(if p.first < 0 { format!("w:hanging=\"{}\"", -p.first) } else { format!("w:firstLine=\"{}\"", p.first) });
+    }
+    if !ind.is_empty() {
+        let _ = write!(s, "<w:ind {}/>", ind.join(" "));
+    }
+    if p.jc != base.jc {
+        let _ = write!(s, "<w:jc w:val=\"{}\"/>", p.jc);
+    }
+    if let Some(level) = outline {
+        let _ = write!(s, "<w:outlineLvl w:val=\"{level}\"/>");
+    }
+    s
+}
+
+/// The `w:rPr` content that turns `base` into `r`, in the schema's element order.
+fn rpr_diff(r: &RunFormat, base: &RunFormat) -> String {
+    let mut s = String::new();
+    if r.family != base.family {
+        let f = attr(&r.family);
+        let _ = write!(s, "<w:rFonts w:ascii=\"{f}\" w:hAnsi=\"{f}\" w:cs=\"{f}\" w:eastAsia=\"{f}\"/>");
+    }
+    let mut toggle = |names: &[&str], on: bool, was: bool| {
+        if on != was {
+            for name in names {
+                let _ = if on { write!(s, "<w:{name}/>") } else { write!(s, "<w:{name} w:val=\"0\"/>") };
+            }
+        }
+    };
+    toggle(&["b", "bCs"], r.bold, base.bold);
+    toggle(&["i", "iCs"], r.italic, base.italic);
+    toggle(&["caps"], r.caps == Caps::All, base.caps == Caps::All);
+    toggle(&["smallCaps"], r.caps == Caps::Small, base.caps == Caps::Small);
+    toggle(&["strike"], r.strike == Strike::Single, base.strike == Strike::Single);
+    toggle(&["dstrike"], r.strike == Strike::Double, base.strike == Strike::Double);
+    if r.color != base.color {
+        let _ = write!(s, "<w:color w:val=\"{}\"/>", hex(r.color));
+    }
+    if r.position != base.position {
+        let _ = write!(s, "<w:position w:val=\"{}\"/>", r.position);
+    }
+    if r.size != base.size {
+        let _ = write!(s, "<w:sz w:val=\"{0}\"/><w:szCs w:val=\"{0}\"/>", r.size);
+    }
+    if r.underline != base.underline {
+        let val = match r.underline {
+            Underline::Single => "single",
+            Underline::Double => "double",
+            Underline::None => "none",
+        };
+        let _ = write!(s, "<w:u w:val=\"{val}\"/>");
+    }
+    if r.vertical != base.vertical {
+        let val = match r.vertical {
+            VerticalAlign::Super => "superscript",
+            VerticalAlign::Sub => "subscript",
+            VerticalAlign::Baseline => "baseline",
+        };
+        let _ = write!(s, "<w:vertAlign w:val=\"{val}\"/>");
+    }
+    s
 }
 
 fn core_xml(title: &str) -> String {

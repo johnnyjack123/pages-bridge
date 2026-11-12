@@ -9,12 +9,12 @@ pub(crate) mod styles;
 mod table;
 pub(crate) mod text;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use iwork::{Msg, Package};
 
 use crate::messages;
-use crate::model::{CharProps, Document, HeaderFooter, Image, ListStyle, PageSetup, Report};
+use crate::model::{CharProps, Document, HeaderFooter, Image, ListStyle, PageSetup, ParaStyle, Report};
 use styles::Styles;
 use text::{AttrTable, Utf16Map};
 
@@ -56,6 +56,8 @@ pub(crate) struct Reader<'p> {
     /// Storages being read; drawables point back at the storage they sit in.
     reading: HashSet<u64>,
     decimal_comma: bool,
+    /// Offered paragraph styles that some paragraph uses.
+    used_styles: BTreeSet<u64>,
 }
 
 /// Reads the whole document. Fails only when the package holds no Pages document at all.
@@ -70,6 +72,7 @@ pub(crate) fn read(pkg: &Package, title: &str) -> Result<(Document, Report), cra
         images: Vec::new(),
         reading: HashSet::new(),
         decimal_comma: true,
+        used_styles: BTreeSet::new(),
     };
     let page = page_setup(&doc);
     let locale = doc.msg(15).and_then(|m| m.msg(1)).and_then(|m| m.string(4)).unwrap_or_default();
@@ -98,10 +101,12 @@ pub(crate) fn read(pkg: &Package, title: &str) -> Result<(Document, Report), cra
         }
     }
     let defaults = reader.default_char_props(body_id);
+    let para_styles = reader.para_styles();
     let document = Document {
         title: title.to_owned(),
         page,
         defaults,
+        para_styles,
         body,
         header,
         footer,
@@ -128,15 +133,51 @@ fn page_setup(doc: &Msg) -> PageSetup {
 }
 
 impl<'p> Reader<'p> {
+    /// The paragraph style shown for a paragraph with Pages style `style`, noting it as used.
+    pub(crate) fn offered_style(&mut self, style: Option<u64>) -> Option<u64> {
+        let offered = self.styles.offered(style);
+        self.used_styles.extend(offered);
+        offered
+    }
+
+    /// The styles the user can pick in Pages, the ones the text uses and what those vary.
+    fn para_styles(&mut self) -> BTreeMap<u64, ParaStyle> {
+        let mut ids = self.used_styles.clone();
+        for id in self.pkg.ids_of_kind(kinds::PARAGRAPH_STYLE) {
+            if self.styles.info(id).is_some_and(|info| info.is_pickable() && info.parent.is_none()) {
+                ids.insert(id);
+            }
+        }
+        for id in ids.clone() {
+            let mut current = id;
+            while let Some(parent) = self.styles.info(current).and_then(|info| info.parent) {
+                if !ids.insert(parent) {
+                    break;
+                }
+                current = parent;
+            }
+        }
+        let mut out = BTreeMap::new();
+        for id in ids {
+            let Some(info) = self.styles.info(id) else { continue };
+            let style = ParaStyle {
+                is_body: info.is_body(),
+                parent: info.parent.filter(|p| self.styles.info(*p).is_some()),
+                name: info.name,
+                kind: self.styles.kind(Some(id)),
+                props: self.styles.para_props(Some(id)),
+                chars: self.styles.char_props(Some(id)),
+            };
+            out.insert(id, style);
+        }
+        out
+    }
+
     /// The template's body text style: Word's document defaults are taken from it.
     fn default_char_props(&mut self, body_id: Option<u64>) -> CharProps {
         let pkg = self.pkg;
-        let body_style = pkg.ids_of_kind(kinds::PARAGRAPH_STYLE).into_iter().find(|id| {
-            pkg.object(*id)
-                .and_then(|s| s.msg(1))
-                .and_then(|sup| sup.string(2))
-                .is_some_and(|ident| ident.ends_with("paragraphstyle-Body 1") || ident.ends_with("paragraphstyle-Body"))
-        });
+        let body_style =
+            pkg.ids_of_kind(kinds::PARAGRAPH_STYLE).into_iter().find(|id| self.styles.info(*id).is_some_and(|i| i.is_body()));
         let style = body_style.or_else(|| {
             let storage = body_id.and_then(|id| pkg.object(id))?;
             let chars = Utf16Map::identity();

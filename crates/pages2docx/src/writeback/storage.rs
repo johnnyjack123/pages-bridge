@@ -1,11 +1,12 @@
 //! Rebuilding the body text storage (`TSWP.StorageArchive`) from edited paragraphs.
 //!
 //! Every character and paragraph of the new text gets its attributes from the original it
-//! corresponds to; new text takes them from its neighbours. Only objects the original storage
-//! already references are used, so the storage's reference list stays within what the package
-//! metadata knows about.
+//! corresponds to; new text takes them from its neighbours. A paragraph style chosen in the word
+//! processor is taken over when its Pages style may be referenced. Only objects the storage
+//! already references or the package metadata already lists for it are used, so the metadata
+//! never has to change.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use iwork::{Encoder, Msg, Package};
 
@@ -13,7 +14,7 @@ use super::diff::align;
 use super::docx_in::{Block as DocxBlock, Format, Para as DocxPara};
 use super::{Report, Unsupported};
 use crate::messages;
-use crate::model::{Block, ListLabel};
+use crate::model::{Block, Document, ListLabel};
 use crate::reader::attach::{is_block_attachment, single_refs};
 use crate::reader::kinds;
 use crate::reader::styles::Styles;
@@ -212,10 +213,44 @@ impl<'p> Original<'p> {
         self.refs.iter().copied().filter(move |r| self.pkg.kind(*r) == Some(kind))
     }
 
+    /// Whether the rebuilt storage may point at `object` without new package metadata.
+    fn can_use(&self, object: u64) -> bool {
+        self.refs.contains(&object) || self.pkg.can_reference(self.id, object)
+    }
+
     fn link_target(&self, field: u64) -> Option<String> {
         (self.pkg.kind(field) == Some(kinds::HYPERLINK)).then(|| self.pkg.object(field).and_then(|f| f.string(2))).flatten()
     }
 }
+
+/// The paragraph styles as the converter named them in the `.docx`.
+pub(crate) struct StyleMap {
+    /// Pages style → docx style id.
+    written: BTreeMap<u64, String>,
+    /// Docx style id → Pages style.
+    pages: HashMap<String, u64>,
+}
+
+impl StyleMap {
+    pub(crate) fn new(doc: &Document) -> Self {
+        let written = crate::docx::style_ids(doc);
+        let pages = written.iter().map(|(pages, docx)| (docx.clone(), *pages)).collect();
+        Self { written, pages }
+    }
+
+    /// The docx style a paragraph with Pages style `style` was written with; `None` for the
+    /// default paragraph style.
+    fn docx_id(&self, style: Option<u64>) -> Option<&str> {
+        style.and_then(|s| self.written.get(&s)).map(String::as_str).filter(|id| *id != DEFAULT_STYLE)
+    }
+
+    fn pages_style(&self, docx_id: Option<&str>) -> Option<u64> {
+        self.pages.get(docx_id.unwrap_or(DEFAULT_STYLE)).copied()
+    }
+}
+
+/// Word's default paragraph style; a paragraph naming no style has it.
+const DEFAULT_STYLE: &str = "Normal";
 
 /// Builds the new paragraphs from the edited document.
 pub(crate) fn rebuild(
@@ -223,10 +258,12 @@ pub(crate) fn rebuild(
     blocks0: &[Block],
     edited: &[DocxBlock],
     alignment: &[Option<usize>],
+    style_map: &StyleMap,
     styles: &mut Styles,
     report: &mut Report,
 ) -> Vec<OutPara> {
-    let mut b = Builder { orig, styles, report, out: Vec::new(), open: None, emitted_attachments: HashSet::new() };
+    let mut b =
+        Builder { orig, style_map, styles, report, out: Vec::new(), open: None, emitted_attachments: HashSet::new() };
     for (j, block) in edited.iter().enumerate() {
         let original = alignment.get(j).copied().flatten().map(|i| &blocks0[i]);
         match (block, original) {
@@ -234,10 +271,10 @@ pub(crate) fn rebuild(
                 Some(o) if o.storage == orig.id => {
                     let ranges = orig.pieces(o.paragraph);
                     let range = ranges.get(o.piece).copied().unwrap_or(orig.paragraphs[o.paragraph]);
-                    if p0.plain_text() != p1.text() {
+                    let restyled = b.piece(o.paragraph, o.piece, range, p1);
+                    if restyled || p0.plain_text() != p1.text() {
                         b.report.paragraphs_changed += 1;
                     }
-                    b.piece(o.paragraph, o.piece, range, p1);
                 }
                 Some(o) => {
                     // A paragraph of a text box: keep the box, edits inside are not written.
@@ -276,6 +313,7 @@ pub(crate) fn rebuild(
 
 struct Builder<'a, 'p, 's> {
     orig: &'a Original<'p>,
+    style_map: &'a StyleMap,
     styles: &'a mut Styles<'s>,
     report: &'a mut Report,
     out: Vec<OutPara>,
@@ -286,10 +324,13 @@ struct Builder<'a, 'p, 's> {
 }
 
 impl Builder<'_, '_, '_> {
-    fn piece(&mut self, k: usize, piece: usize, range: (usize, usize), p1: &DocxPara) {
+    /// Adds a piece of original paragraph `k`; returns whether it got another paragraph style.
+    fn piece(&mut self, k: usize, piece: usize, range: (usize, usize), p1: &DocxPara) -> bool {
         let continues = matches!(self.open, Some((ok, last)) if ok == k && last.is_none_or(|l| piece > l));
+        let mut restyled = false;
         if !continues {
             let mut attrs = self.orig.para_attrs(k);
+            restyled = self.apply_style(&mut attrs, p1.style.as_deref());
             self.apply_list(&mut attrs, p1.list_level);
             self.out.push(OutPara { attrs, mark: self.orig.mark_attrs(k), ..OutPara::default() });
         }
@@ -299,6 +340,7 @@ impl Builder<'_, '_, '_> {
         para.chars.extend(chars);
         para.char_attrs.extend(char_attrs);
         self.open = Some((k, Some(piece)));
+        restyled
     }
 
     fn new_paragraph(&mut self, p1: &DocxPara) {
@@ -306,6 +348,7 @@ impl Builder<'_, '_, '_> {
             .out
             .last()
             .map_or_else(|| self.orig.para_attrs(0), |p| ParaAttrs { list_start: None, ..p.attrs });
+        self.apply_style(&mut attrs, p1.style.as_deref());
         self.apply_list(&mut attrs, p1.list_level);
         let (chars, char_attrs) = self.map_chars((0, 0), p1, attrs.style);
         self.out.push(OutPara { attrs, chars, char_attrs, mark: CharAttrs::default() });
@@ -424,6 +467,25 @@ impl Builder<'_, '_, '_> {
         }
         *lost = true;
         style
+    }
+
+    /// Gives the paragraph the Pages style behind the docx style it has in the edited document,
+    /// if that is another one than it was written with. Returns whether the style changed.
+    fn apply_style(&mut self, attrs: &mut ParaAttrs, edited: Option<&str>) -> bool {
+        let edited = edited.filter(|id| *id != DEFAULT_STYLE);
+        if self.style_map.docx_id(attrs.style) == edited {
+            return false;
+        }
+        match self.style_map.pages_style(edited).filter(|s| self.orig.can_use(*s)) {
+            Some(style) => {
+                attrs.style = Some(style);
+                true
+            }
+            None => {
+                self.report.skip(messages::NOT_WRITTEN_PARA_STYLE);
+                false
+            }
+        }
     }
 
     fn is_list(&mut self, list_style: Option<u64>, level: u64) -> bool {

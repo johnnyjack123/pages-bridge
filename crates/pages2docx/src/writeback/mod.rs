@@ -3,8 +3,8 @@
 //! The Pages file changes as little as possible: the body text storage is rebuilt from the
 //! edited paragraphs, edited table cells get their new text, and the view state forgets the old
 //! layout and selection. Everything else keeps its bytes. Only objects the document already
-//! references are reused (paragraph, character and list styles, links), so no object, stylesheet
-//! entry or metadata record has to be created; edits that would need one are reported instead.
+//! has are used (paragraph, character and list styles, links), so no object, stylesheet entry
+//! or metadata record has to be created; edits that would need one are reported instead.
 //!
 //! The written file is read back before it is accepted.
 
@@ -86,7 +86,9 @@ pub fn write_back(pages: &Path, docx: &Path, out: &Path, options: Options) -> Re
 
     let mut report = Report::default();
     let mut styles = Styles::new(&pkg);
-    let paragraphs = storage::rebuild(&original, &document.body, &edited, &alignment, &mut styles, &mut report);
+    let style_map = storage::StyleMap::new(&document);
+    let paragraphs =
+        storage::rebuild(&original, &document.body, &edited, &alignment, &style_map, &mut styles, &mut report);
     let mut edits = Edits::new();
     let encoded = storage::encode(&original, &paragraphs);
     let text_changed = paragraphs != original.identity();

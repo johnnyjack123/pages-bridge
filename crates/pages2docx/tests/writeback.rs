@@ -51,8 +51,14 @@ fn edited_text_and_new_paragraphs_keep_styles_and_objects() {
 /// Adds run properties to the run showing `text`.
 fn format_run(xml: &str, text: &str, props: &str) -> String {
     let at = xml.find(&format!(">{text}</w:t>")).unwrap();
-    let start = xml[..at].rfind("<w:rPr>").unwrap() + "<w:rPr>".len();
-    format!("{}{props}{}", &xml[..start], &xml[start..])
+    let run = xml[..at].rfind("<w:r>").unwrap() + "<w:r>".len();
+    match xml[run..at].find("<w:rPr>") {
+        Some(rpr) => {
+            let start = run + rpr + "<w:rPr>".len();
+            format!("{}{props}{}", &xml[..start], &xml[start..])
+        }
+        None => format!("{}<w:rPr>{props}</w:rPr>{}", &xml[..run], &xml[run..]),
+    }
 }
 
 #[test]
@@ -136,6 +142,38 @@ fn text_in_a_row_pages_did_not_store() {
     let mut expected = before;
     expected[4][2] = "test2".to_owned();
     assert_eq!(table_texts(&read_part(&again, "word/document.xml").unwrap()), expected);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Gives the paragraph containing `text` the paragraph style `style`.
+fn restyle(xml: &str, text: &str, style: &str) -> String {
+    let at = xml.find(text).unwrap();
+    let start = xml[..at].rfind("<w:pStyle w:val=\"").unwrap() + "<w:pStyle w:val=\"".len();
+    let end = start + xml[start..].find('"').unwrap();
+    format!("{}{style}{}", &xml[..start], &xml[end..])
+}
+
+#[test]
+fn a_style_chosen_in_the_word_processor_is_written_back() {
+    let Some(original) = reference("Cuba hoy.pages") else {
+        eprintln!("reference/Cuba hoy.pages missing, skipped");
+        return;
+    };
+    let dir = scratch_dir("wb-restyle");
+    let (pages, docx, out) = (dir.join("Cuba.pages"), dir.join("Cuba.docx"), dir.join("out.pages"));
+    std::fs::copy(original, &pages).unwrap();
+    pages2docx::convert(&pages, &docx).unwrap();
+    // Pages' "Überschrift" is Word's "Heading 1"; "Quote" does not exist in the Pages document.
+    edit_docx(&docx, |xml| restyle(&restyle(xml, "geografía, población", "Heading1"), "colonialismo", "Quote"));
+
+    let report = write_back(&pages, &docx, &out, Options::default()).unwrap();
+    assert_eq!(report.paragraphs_changed, 1, "{report:?}");
+    assert_eq!(report.not_written.len(), 1, "the unknown style is reported: {report:?}");
+    let again = dir.join("again.docx");
+    pages2docx::convert(&out, &again).unwrap();
+    let xml = read_part(&again, "word/document.xml").unwrap();
+    let heading = &xml[..xml.find("geografía, población").unwrap()];
+    assert!(heading[heading.rfind("<w:p>").unwrap()..].contains("<w:pStyle w:val=\"Heading1\"/>"));
     let _ = std::fs::remove_dir_all(dir);
 }
 

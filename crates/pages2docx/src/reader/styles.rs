@@ -106,6 +106,30 @@ impl<'p> Styles<'p> {
         kind
     }
 
+    /// Name, identifier and parent of a style (`TSS.StyleArchive`, field 1 of every style).
+    pub(crate) fn info(&self, id: u64) -> Option<StyleInfo> {
+        let sup = self.pkg.object(id)?.msg(1)?;
+        Some(StyleInfo {
+            name: sup.string(1).filter(|n| !n.is_empty()),
+            ident: sup.string(2).filter(|i| !i.is_empty()),
+            parent: sup.reference(3),
+        })
+    }
+
+    /// `id` if it is a style the user picks in Pages, or a variation of one; `None` for the
+    /// unnamed styles Pages keeps for its own use, such as those of table cells.
+    pub(crate) fn offered(&self, id: Option<u64>) -> Option<u64> {
+        let mut current = id?;
+        for _ in 0..32 {
+            let info = self.info(current)?;
+            if info.name.is_some() {
+                return id;
+            }
+            current = info.parent?;
+        }
+        None
+    }
+
     /// List styles keep their properties at the top level of the style object.
     pub(crate)fn list_style(&self, id: u64) -> ListStyle {
         let mut merged = Msg::default();
@@ -113,6 +137,32 @@ impl<'p> Styles<'p> {
             merged.overlay(&style);
         }
         list_style_from(&merged)
+    }
+}
+
+pub(crate) struct StyleInfo {
+    /// `None` for variations and for Pages' internal styles.
+    pub name: Option<String>,
+    /// Pages' identifier of a template style, e.g. `text-11-paragraphstyle-Heading 1`.
+    pub ident: Option<String>,
+    pub parent: Option<u64>,
+}
+
+impl StyleInfo {
+    /// The template's style for body text.
+    pub(crate) fn is_body(&self) -> bool {
+        self.ident.as_deref().is_some_and(|i| i.ends_with("paragraphstyle-Body 1") || i.ends_with("paragraphstyle-Body"))
+    }
+
+    /// A named style the user can pick in Pages' text style menu. Pages' default root style
+    /// and the styles of object captions, charts and comments are left out.
+    pub(crate) fn is_pickable(&self) -> bool {
+        self.name.is_some()
+            && self.ident.as_deref().is_none_or(|i| {
+                !["paragraph-style-default", "captions-", "chart-", "tableCell", "stickyComment"]
+                    .iter()
+                    .any(|prefix| i.starts_with(prefix))
+            })
     }
 }
 

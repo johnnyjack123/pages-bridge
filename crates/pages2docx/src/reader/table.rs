@@ -186,6 +186,7 @@ impl Reader<'_> {
     ) -> Vec<Block> {
         let props = self.styles.para_props(style);
         let mark = self.styles.char_props(style);
+        let offered = self.offered_style(style);
         let mut blocks = Vec::new();
         if let Some(cell) = cell {
             if cell.kind == 9 {
@@ -214,6 +215,7 @@ impl Reader<'_> {
                         }]
                     };
                     blocks.push(Block::Paragraph(Paragraph {
+                        style: offered,
                         props: props.clone(),
                         mark: mark.clone(),
                         inlines,
@@ -223,7 +225,7 @@ impl Reader<'_> {
             }
         }
         if blocks.is_empty() {
-            blocks.push(Block::Paragraph(Paragraph { props, mark, ..Paragraph::default() }));
+            blocks.push(Block::Paragraph(Paragraph { style: offered, props, mark, ..Paragraph::default() }));
         }
         blocks
     }

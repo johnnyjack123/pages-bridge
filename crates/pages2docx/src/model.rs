@@ -214,7 +214,10 @@ pub struct Origin {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Paragraph {
-    pub kind: ParaKind,
+    /// Key into [`Document::para_styles`]; `None` for styles that are not offered to the user,
+    /// such as the ones Pages keeps for table cells.
+    pub style: Option<u64>,
+    /// Fully resolved: the style's properties with everything the paragraph changes.
     pub props: ParaProps,
     /// Formatting of the paragraph mark: what an empty paragraph is measured with.
     pub mark: CharProps,
@@ -370,12 +373,29 @@ impl HeaderFooter {
     }
 }
 
+/// A paragraph style, so that word processors can offer it and apply it again.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ParaStyle {
+    /// `None` for a variation: Pages' "Text*", a style changed on one paragraph only.
+    pub name: Option<String>,
+    /// The style a variation changes; a key into [`Document::para_styles`].
+    pub parent: Option<u64>,
+    pub kind: ParaKind,
+    /// The template's style for body text.
+    pub is_body: bool,
+    /// Fully resolved, including everything inherited.
+    pub props: ParaProps,
+    pub chars: CharProps,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Document {
     pub title: String,
     pub page: PageSetup,
     /// The template's body text formatting.
     pub defaults: CharProps,
+    /// Keyed by the style's object id in the source document.
+    pub para_styles: BTreeMap<u64, ParaStyle>,
     pub body: Vec<Block>,
     pub header: Option<HeaderFooter>,
     pub footer: Option<HeaderFooter>,

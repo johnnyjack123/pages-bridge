@@ -168,6 +168,24 @@ impl Package {
         self.objects.get(&id).map_or(&[], |o| o.references.as_slice())
     }
 
+    /// Whether `from` may reference `target` without the package metadata changing: both sit
+    /// in the same archive, or the metadata already lists `target` among the external
+    /// references of the component holding `from`. This crate never edits the metadata.
+    pub fn can_reference(&self, from: u64, target: u64) -> bool {
+        let (Some(a), Some(b)) = (self.objects.get(&from), self.objects.get(&target)) else { return false };
+        if a.file == b.file {
+            return true;
+        }
+        self.ids_of_kind(PACKAGE_METADATA).into_iter().filter_map(|id| self.object(id)).any(|meta| {
+            meta.msgs(3).iter().any(|component| {
+                // Field 3 is the component's locator, 2 the preferred one; both name the archive.
+                let holds_from =
+                    [component.string(3), component.string(2)].into_iter().flatten().any(|l| a.file == format!("Index/{l}.iwa"));
+                holds_from && component.msgs(6).iter().any(|r| r.uint(2) == Some(target))
+            })
+        })
+    }
+
     pub fn ids_of_kind(&self, kind: u32) -> Vec<u64> {
         let mut ids: Vec<u64> = self.objects.iter().filter(|(_, o)| o.kind == kind).map(|(id, _)| *id).collect();
         ids.sort_unstable();
