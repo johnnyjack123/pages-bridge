@@ -1,0 +1,97 @@
+# Tests, and builds the setup and the console program for Windows on x64 and ARM64.
+# Every run keeps them as artifacts; a pushed tag "v…" publishes them as a release.
+name: Build
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Windows ${{ matrix.arch }}
+    # Both architectures build on x64; ARM64 is cross-compiled with Visual Studio's ARM64 tools.
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+          rustup component add clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # The tests run on the build machine, so only for the x64 build. The reference documents
+      # are not in the repository; their tests skip.
+      - name: Test
+        if: matrix.arch == 'x64'
+        run: cargo test --locked --target ${{ matrix.target }}
+
+      - name: Clippy
+        if: matrix.arch == 'x64'
+        run: cargo clippy --locked --all-targets --target ${{ matrix.target }} -- -D warnings
+
+      - name: Build the console program
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin pages-bridge
+
+      # The setup is the windowed program with the console program inside (see build.rs).
+      - name: Build the setup
+        shell: pwsh
+        run: |
+          $env:PAGES_BRIDGE_EMBED_CLI = "$PWD\target\${{ matrix.target }}\release\pages-bridge.exe"
+          cargo build --release --locked --target ${{ matrix.target }} --bin pages-bridgew
+
+      - name: Collect
+        shell: pwsh
+        run: |
+          $release = "target\${{ matrix.target }}\release"
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item "$release\pages-bridgew.exe" "dist\pages-bridge-setup-${{ matrix.arch }}.exe"
+          Copy-Item "$release\pages-bridge.exe" "dist\pages-bridge-${{ matrix.arch }}.exe"
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pages-bridge-${{ matrix.arch }}
+          path: dist/*.exe
+          if-no-files-found: error
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "${{ github.ref_name }}" dist/*.exe
+          --repo "${{ github.repository }}"
+          --title "pages-bridge ${{ github.ref_name }}"
+          --generate-notes
