@@ -1,8 +1,8 @@
-//! Converts Apple Pages documents (`.pages`, Pages 5 / 2013 and later) to Word `.docx`, and opens
-//! the result in a word processor chosen in a JSON settings file.
+//! Opens Apple Pages documents (`.pages`, Pages 5 / 2013 and later) in Word-compatible word
+//! processors: converts them to `.docx`, and writes the edits made there back into the `.pages`.
 //!
-//! The work is split into a reader (Pages → [`model`]) and a writer (model → docx), so other
-//! targets or a way back to Pages can reuse either side.
+//! The work is split into a reader (Pages → [`model`]), a writer (model → docx) and
+//! [`writeback`] (edited docx → Pages).
 
 pub mod cli;
 pub mod config;
@@ -10,6 +10,8 @@ mod docx;
 mod messages;
 pub mod model;
 mod reader;
+#[cfg(windows)]
+mod setup;
 mod sync;
 mod system;
 pub mod writeback;
@@ -20,7 +22,9 @@ use std::path::Path;
 pub use model::{Document, Report};
 
 /// Written into the docx properties, so a converted file can be recognised later.
-pub(crate) const CONVERTED_MARKER: &str = "Converted from Apple Pages with pages2docx";
+pub(crate) const CONVERTED_MARKER: &str = "Converted from Apple Pages with pages-bridge";
+/// What [`CONVERTED_MARKER`] said while the program was called pages2docx.
+pub(crate) const OLD_CONVERTED_MARKER: &str = "Converted from Apple Pages with pages2docx";
 
 #[derive(Debug)]
 pub enum Error {

@@ -13,10 +13,10 @@ fn reference(name: &str) -> Option<PathBuf> {
 fn converted(pages: &Path) -> (String, String) {
     // Tests run in parallel: one folder per document.
     let stem = pages.file_stem().unwrap().to_string_lossy();
-    let dir = std::env::temp_dir().join(format!("pages2docx-ref-{stem}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("pages-bridge-ref-{stem}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let docx = dir.join("out.docx");
-    pages2docx::convert(pages, &docx).unwrap();
+    pages_bridge::convert(pages, &docx).unwrap();
     let mut archive = zip::ZipArchive::new(std::fs::File::open(&docx).unwrap()).unwrap();
     let mut part = |name: &str| {
         let mut xml = String::new();
@@ -90,11 +90,11 @@ fn showcase() {
 fn unchanged_references_write_nothing() {
     for name in ["Cuba hoy.pages", "Showcase.pages"] {
         let Some(pages) = reference(name) else { continue };
-        let dir = std::env::temp_dir().join(format!("pages2docx-ref-identity-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("pages-bridge-ref-identity-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let (docx, out) = (dir.join("a.docx"), dir.join("a.pages"));
-        pages2docx::convert(&pages, &docx).unwrap();
-        let report = pages2docx::writeback::write_back(&pages, &docx, &out, Default::default()).unwrap();
+        pages_bridge::convert(&pages, &docx).unwrap();
+        let report = pages_bridge::writeback::write_back(&pages, &docx, &out, Default::default()).unwrap();
         assert!(!out.exists() && report.not_written.is_empty(), "{name}: {report:?}");
         let _ = std::fs::remove_dir_all(dir);
     }

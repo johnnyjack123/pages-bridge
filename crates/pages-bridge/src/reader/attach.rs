@@ -234,7 +234,7 @@ fn jpeg_size(data: &[u8]) -> Option<(u32, u32)> {
 
 /// HEIC, PDF and other pictures Word cannot embed become PNG when ImageMagick is installed.
 fn convert_with_imagemagick(data: &[u8]) -> Option<Vec<u8>> {
-    let dir = std::env::temp_dir().join(format!("pages2docx-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("pages-bridge-{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok()?;
     let (src, dst): (PathBuf, PathBuf) = (dir.join("in"), dir.join("out.png"));
     let result = (|| {

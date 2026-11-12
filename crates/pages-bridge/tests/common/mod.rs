@@ -168,7 +168,7 @@ pub fn build_document(path: &Path) {
 }
 
 pub fn scratch_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("pages2docx-test-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("pages-bridge-test-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }

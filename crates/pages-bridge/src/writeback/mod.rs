@@ -37,6 +37,8 @@ pub enum Unsupported {
 /// What write-back did, and what it could not carry over.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
+    /// Whether a file was written; not when the edited document matches the original.
+    pub written: bool,
     pub paragraphs_changed: usize,
     pub cells_changed: usize,
     /// Kind of edit (user-facing) → count.
@@ -114,6 +116,7 @@ pub fn write_back(pages: &Path, docx: &Path, out: &Path, options: Options) -> Re
         let _ = std::fs::remove_file(out);
         return Err(Error::Verification(why));
     }
+    report.written = true;
     Ok(report)
 }
 

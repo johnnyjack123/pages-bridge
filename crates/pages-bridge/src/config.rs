@@ -64,15 +64,21 @@ impl Default for Config {
     }
 }
 
-/// `%APPDATA%\pages2docx\config.json`, or next to the program where there is no `%APPDATA%`.
-pub fn path() -> PathBuf {
+/// `%APPDATA%`, or the program's folder where there is none.
+fn base_dir() -> PathBuf {
     let base = std::env::var_os("APPDATA").map(PathBuf::from).or_else(|| {
         std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf))
     });
-    base.unwrap_or_default().join("pages2docx").join("config.json")
+    base.unwrap_or_default()
 }
 
-/// Loads the settings, writing the defaults first if there is no file yet.
+/// `%APPDATA%\pages-bridge\config.json`.
+pub fn path() -> PathBuf {
+    base_dir().join(crate::system::APP_DIR).join("config.json")
+}
+
+/// Loads the settings, writing the defaults first if there is no file yet. Settings saved under
+/// the program's former name are taken over.
 ///
 /// A file that does not parse is left untouched and reported, so a typo never silently
 /// discards the user's settings.
@@ -80,19 +86,29 @@ pub fn load_or_create(path: &Path) -> Result<Config, String> {
     match std::fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(text.trim_start_matches('\u{FEFF}')).map_err(|e| e.to_string()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let config = Config::default();
-            if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-            }
-            std::fs::write(path, default_file(&config)).map_err(|e| e.to_string())?;
+            let old = base_dir().join(crate::system::OLD_APP_DIR).join("config.json");
+            let config = std::fs::read_to_string(old)
+                .ok()
+                .filter(|_| path == self::path())
+                .and_then(|text| serde_json::from_str(text.trim_start_matches('\u{FEFF}')).ok())
+                .unwrap_or_default();
+            save(path, &config)?;
             Ok(config)
         }
         Err(e) => Err(e.to_string()),
     }
 }
 
-/// The defaults plus an explanation; JSON has no comments, and unknown keys are ignored.
-fn default_file(config: &Config) -> String {
+/// Writes the settings, with the explanation the file always carries.
+pub fn save(path: &Path, config: &Config) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(path, file_text(config)).map_err(|e| e.to_string())
+}
+
+/// The settings plus an explanation; JSON has no comments, and unknown keys are ignored.
+fn file_text(config: &Config) -> String {
     let mut value = serde_json::to_value(config).unwrap_or_default();
     if let Some(map) = value.as_object_mut() {
         map.insert(
@@ -122,7 +138,7 @@ mod tests {
         // Settings files written before write-back existed get it switched on.
         assert!(config.write_back);
         assert_eq!(config.docx_location, DocxLocation::Temp);
-        let text = default_file(&config);
+        let text = file_text(&config);
         assert_eq!(serde_json::from_str::<Config>(&text).unwrap(), config);
     }
 }

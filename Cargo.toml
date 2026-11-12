@@ -1,11 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/iwork", "crates/pages2docx"]
+members = ["crates/iwork", "crates/pages-bridge"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/johnnyjack123/pages-bridge"
 rust-version = "1.85"
 
 [workspace.lints.rust]

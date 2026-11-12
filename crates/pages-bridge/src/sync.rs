@@ -178,7 +178,7 @@ impl Session<'_> {
             Ok(report) => {
                 self.read_failures = 0;
                 self.outcome.not_written = report.not_written;
-                if !tmp.exists() {
+                if !report.written {
                     return true;
                 }
                 if let Err(e) = self.replace_target(&tmp) {
@@ -222,7 +222,7 @@ impl Session<'_> {
 
 /// Copies `pages` into the backup folder before it is first overwritten, keeping the newest
 /// [`KEEP_BACKUPS`] backups.
-fn backup(pages: &Path) -> std::io::Result<PathBuf> {
+pub(crate) fn backup(pages: &Path) -> std::io::Result<PathBuf> {
     let dir = system::data_dir().join(messages::BACKUP_FOLDER);
     std::fs::create_dir_all(&dir)?;
     let stem = pages.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn free_names_are_numbered() {
-        let dir = std::env::temp_dir().join(format!("pages2docx-free-name-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("pages-bridge-free-name-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("Doc.pages");
         assert_eq!(free_name(&file, "bearbeitet"), dir.join("Doc (bearbeitet).pages"));

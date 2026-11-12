@@ -21,3 +21,6 @@ desktop.ini
 
 # Files prepared for testing in Pages on iPhone/iPad
 /iphone-test/
+
+# Build output collected for release
+/dist/

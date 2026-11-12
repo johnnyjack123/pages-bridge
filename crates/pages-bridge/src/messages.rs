@@ -1,22 +1,97 @@
 //! Everything the user reads, in one place so the tool can be translated.
+#![cfg_attr(not(windows), allow(dead_code))]
 
 use std::path::Path;
 
 use crate::Error;
 
-pub const ABOUT: &str = "Wandelt Apple-Pages-Dokumente (.pages) in Word-Dateien (.docx) um und öffnet sie \
-                         auf Wunsch im eingestellten Programm.";
+pub const ABOUT: &str = "Öffnet Apple-Pages-Dokumente (.pages) in Word oder WordCraft und schreibt Änderungen \
+                         in die .pages-Datei zurück. Wandelt auch einfach zwischen .pages und .docx um.";
+pub const HELP_AFTER: &str = "Beispiele:\n  \
+    pages-bridge Bericht.pages                  Bericht.docx daneben anlegen\n  \
+    pages-bridge to-pages Bericht.docx          Änderungen in „Bericht (bearbeitet).pages“ schreiben\n  \
+    pages-bridge to-pages Bericht.docx -i       Änderungen direkt in Bericht.pages schreiben\n  \
+    pages-bridge config --open-with word        .pages-Dateien künftig in Word öffnen";
+pub const HELP_TO_DOCX: &str = ".pages in .docx umwandeln (auch ohne Befehl: pages-bridge Datei.pages)";
 pub const HELP_FILES: &str = ".pages-Dateien, die umgewandelt werden sollen";
 pub const HELP_OUTPUT: &str = "Zieldatei (nur bei genau einer Eingabedatei)";
 pub const HELP_OVERWRITE: &str = "Eine vorhandene .docx gleichen Namens ersetzen";
-pub const HELP_OPEN: &str = "Umwandeln und im eingestellten Programm öffnen (das macht der Doppelklick)";
+pub const HELP_TO_PAGES: &str = "Änderungen aus einer .docx in die .pages-Datei schreiben, aus der sie umgewandelt wurde";
+pub const HELP_TO_PAGES_DOCX: &str = "Die bearbeitete .docx-Datei";
+pub const HELP_TO_PAGES_ORIGINAL: &str = "Die ursprüngliche .pages-Datei (Standard: gleicher Name wie die .docx)";
+pub const HELP_OUTPUT_PAGES: &str = "Zieldatei (Standard: „Name (bearbeitet).pages“ neben dem Original)";
+pub const HELP_IN_PLACE: &str = "Direkt in die ursprüngliche .pages-Datei schreiben (vorher wird eine Sicherung angelegt)";
+pub const HELP_OPEN: &str = "Umwandeln, im eingestellten Programm öffnen und Änderungen zurückschreiben (das macht der Doppelklick)";
 pub const HELP_OPEN_FILE: &str = "Die .pages-Datei";
-pub const HELP_INSTALL: &str = "Doppelklick auf .pages-Dateien einrichten (nur für den aktuellen Benutzer)";
-pub const HELP_UNINSTALL: &str = "Die Doppelklick-Zuordnung wieder entfernen";
-pub const HELP_CONFIG: &str = "Die Einstellungsdatei anzeigen (wird bei Bedarf angelegt)";
+pub const HELP_SETTINGS: &str = "Das Einstellungsfenster öffnen (oder das Installationsfenster, falls noch nicht installiert)";
+pub const HELP_CONFIG: &str = "Einstellungen anzeigen oder ändern";
+pub const HELP_OPEN_WITH: &str =
+    "Womit .pages-Dateien geöffnet werden: wordcraft, word, default (Windows-Standard für .docx) oder Pfad zu einer .exe";
+pub const HELP_WRITE_BACK: &str = "Jedes Speichern in die .pages-Datei zurückschreiben: on oder off";
+pub const HELP_DOCX_LOCATION: &str = "Wo die .docx beim Bearbeiten liegt: unsichtbar (temp) oder neben der .pages-Datei";
+pub const HELP_INSTALL: &str = "Installieren und Doppelklick auf .pages-Dateien einrichten (nur für den aktuellen Benutzer)";
+pub const HELP_NO_ASSOCIATE: &str = ".pages-Dateien nicht zuordnen, nur installieren";
+pub const HELP_UNINSTALL: &str = "pages-bridge wieder entfernen (Einstellungen und Sicherungen bleiben)";
 
 pub const WINDOW_TITLE: &str = "Pages öffnen";
 pub const FILE_TYPE_NAME: &str = "Apple Pages-Dokument";
+
+// The setup and settings window.
+pub const SETUP_TITLE: &str = "pages-bridge";
+pub const SETUP_INSTRUCTION: &str = "pages-bridge installieren";
+pub const SETTINGS_INSTRUCTION: &str = "Einstellungen";
+pub const SETUP_CONTENT: &str = "Öffnet Apple-Pages-Dokumente in Word oder WordCraft und schreibt jedes Speichern in \
+                                 die .pages-Datei zurück.\n\nPages-Dokumente öffnen mit:";
+pub const CHOICE_WORDCRAFT: &str = "WordCraft";
+pub const CHOICE_WORD: &str = "Microsoft Word";
+pub const CHOICE_DEFAULT: &str = "dem Standardprogramm für Word-Dateien";
+pub const SETUP_ASSOCIATE: &str = ".pages-Dateien per Doppelklick so öffnen";
+pub const SETUP_FOOTER: &str = "Wird nur für dich installiert, ohne Administratorrechte.\n\
+                                Ändern oder entfernen: Startmenü › pages-bridge Einstellungen";
+pub const BUTTON_INSTALL: &str = "Installieren";
+pub const BUTTON_SAVE: &str = "Speichern";
+pub const BUTTON_UNINSTALL: &str = "Deinstallieren";
+pub const UNINSTALL_CONFIRM: &str =
+    "pages-bridge entfernen?\n\nDeine Pages-Dateien, die Einstellungen und die Sicherungskopien bleiben erhalten.";
+/// Start menu entry that opens the settings.
+pub const SHORTCUT_NAME: &str = "pages-bridge Einstellungen";
+pub const SHORTCUT_DESCRIPTION: &str = "Einstellen, womit Pages-Dokumente geöffnet werden";
+
+pub fn not_found(program: &str) -> String {
+    format!("{program} (nicht gefunden)")
+}
+
+pub fn current_program(program: &str) -> String {
+    format!("{program} (bisherige Einstellung)")
+}
+
+pub fn setup_done(program: &str, associated: bool) -> String {
+    if associated {
+        format!(
+            "Fertig. Ein Doppelklick auf eine .pages-Datei öffnet sie jetzt mit {program}, und jedes Speichern landet \
+             in der .pages-Datei.\n\nÄndern oder entfernen: Startmenü › {SHORTCUT_NAME}"
+        )
+    } else {
+        format!("Fertig. pages-bridge ist installiert, .pages-Dateien sind ihm aber nicht zugeordnet.\n\n\
+                 Ändern oder entfernen: Startmenü › {SHORTCUT_NAME}")
+    }
+}
+
+pub fn uninstalled(data: &Path) -> String {
+    format!(
+        "pages-bridge wurde entfernt.\n\nEinstellungen, Sicherungskopien und Protokoll liegen weiter hier und können \
+         gelöscht werden:\n{}",
+        data.display()
+    )
+}
+
+pub fn uninstall_failed(why: &str) -> String {
+    format!("pages-bridge konnte nicht vollständig entfernt werden:\n{why}")
+}
+
+pub fn backed_up(path: &Path) -> String {
+    format!("Sicherung der vorherigen Fassung: {}", path.display())
+}
 
 pub const NOTE_NO_BODY: &str = "Hinweis: Layout-Dokument ohne Fließtext, nur die Textfelder wurden übernommen.";
 pub const SKIP_OBJECT: &str = "Objekt";
@@ -79,11 +154,6 @@ pub fn describe(error: &Error, path: &Path) -> String {
     }
 }
 
-pub const HELP_WRITEBACK: &str = "Änderungen aus einer bearbeiteten .docx von Hand zurückschreiben, in eine neue \
-                                  Pages-Datei (beim Doppelklick passiert das automatisch)";
-pub const HELP_WRITEBACK_DOCX: &str = "Die bearbeitete .docx-Datei";
-pub const HELP_WRITEBACK_PAGES: &str = "Die ursprüngliche .pages-Datei (Standard: gleicher Name wie die .docx)";
-pub const HELP_OUTPUT_PAGES: &str = "Zieldatei (Standard: „Name (bearbeitet).pages“ neben dem Original)";
 pub const NO_CHANGES: &str = "Keine Änderungen gefunden, es wurde nichts geschrieben.";
 
 /// Name part of the copy write-back creates: „Name (bearbeitet).pages“.
@@ -110,7 +180,12 @@ pub fn kept_docx(path: &Path) -> String {
 }
 
 pub fn pages_not_found(path: &Path) -> String {
-    format!("Die zugehörige Pages-Datei wurde nicht gefunden:\n{}\nBitte mit --pages angeben.", path.display())
+    format!(
+        "Die zugehörige Pages-Datei wurde nicht gefunden:\n{}\n\npages-bridge schreibt Änderungen in die .pages-Datei, \
+         aus der die .docx umgewandelt wurde; ganz neue .pages-Dateien kann es nicht anlegen. Liegt das Original woanders \
+         oder heißt es anders, bitte mit --pages angeben.",
+        path.display()
+    )
 }
 
 pub fn written_back(path: &Path, paragraphs: usize, cells: usize) -> String {
@@ -167,17 +242,17 @@ pub fn launch_failed(program: &Path, why: &str) -> String {
     format!("„{}“ konnte nicht gestartet werden:\n{why}", program.display())
 }
 
-pub fn installed(dir: &Path) -> String {
-    format!(
-        "Fertig: Ein Doppelklick auf eine .pages-Datei öffnet sie jetzt umgewandelt.\nProgramm installiert in: {}",
-        dir.display()
-    )
+pub fn installed(dir: &Path, associated: bool) -> String {
+    let first = if associated {
+        "Fertig: Ein Doppelklick auf eine .pages-Datei öffnet sie jetzt umgewandelt."
+    } else {
+        "Fertig: pages-bridge ist installiert, .pages-Dateien sind ihm nicht zugeordnet."
+    };
+    format!("{first}\nProgramm installiert in: {}", dir.display())
 }
 
-pub const UNINSTALLED: &str = "Die Doppelklick-Zuordnung für .pages wurde entfernt.";
-
 pub fn install_failed(why: &str) -> String {
-    format!("Die Dateizuordnung konnte nicht eingerichtet werden:\n{why}")
+    format!("pages-bridge konnte nicht eingerichtet werden:\n{why}")
 }
 
 #[cfg_attr(windows, allow(dead_code))]

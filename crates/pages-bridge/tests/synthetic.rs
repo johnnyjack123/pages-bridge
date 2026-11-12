@@ -12,7 +12,7 @@ fn converts_formatting_pictures_breaks_and_fields() {
     let (pages, docx) = (dir.join("test.pages"), dir.join("test.docx"));
     build_document(&pages);
 
-    let report = pages2docx::convert(&pages, &docx).unwrap();
+    let report = pages_bridge::convert(&pages, &docx).unwrap();
     assert!(report.skipped.is_empty(), "skipped: {:?}", report.skipped);
 
     let doc = read_part(&docx, "word/document.xml").unwrap();
@@ -41,6 +41,6 @@ fn rejects_files_that_are_not_pages_documents() {
     let dir = scratch_dir("invalid");
     let path = dir.join("broken.pages");
     std::fs::write(&path, b"not a zip").unwrap();
-    assert!(matches!(pages2docx::convert(&path, &dir.join("out.docx")), Err(pages2docx::Error::Package(iwork::Error::NotIwork))));
+    assert!(matches!(pages_bridge::convert(&path, &dir.join("out.docx")), Err(pages_bridge::Error::Package(iwork::Error::NotIwork))));
     let _ = std::fs::remove_dir_all(dir);
 }

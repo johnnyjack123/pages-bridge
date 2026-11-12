@@ -5,16 +5,16 @@ mod common;
 use std::path::Path;
 
 use common::{BODY, BODY_STORAGE, build_document, edit_docx, read_part, run_props, scratch_dir, storage_text};
-use pages2docx::writeback::{Options, write_back};
+use pages_bridge::writeback::{Options, write_back};
 
 #[test]
 fn an_unchanged_document_writes_nothing() {
     let dir = scratch_dir("wb-unchanged");
     let (pages, docx, out) = (dir.join("a.pages"), dir.join("a.docx"), dir.join("out.pages"));
     build_document(&pages);
-    pages2docx::convert(&pages, &docx).unwrap();
+    pages_bridge::convert(&pages, &docx).unwrap();
     let report = write_back(&pages, &docx, &out, Options::default()).unwrap();
-    assert!(report.is_unchanged() && report.not_written.is_empty(), "{report:?}");
+    assert!(!report.written && report.is_unchanged() && report.not_written.is_empty(), "{report:?}");
     assert!(!out.exists());
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -24,7 +24,7 @@ fn edited_text_and_new_paragraphs_keep_styles_and_objects() {
     let dir = scratch_dir("wb-edit");
     let (pages, docx, out) = (dir.join("a.pages"), dir.join("a.docx"), dir.join("out.pages"));
     build_document(&pages);
-    pages2docx::convert(&pages, &docx).unwrap();
+    pages_bridge::convert(&pages, &docx).unwrap();
     edit_docx(&docx, |xml| {
         xml.replace("Nach Seitenumbruch", "Nach dem Umbruch")
             .replace("<w:sectPr>", "<w:p><w:r><w:t>Neuer Absatz</w:t></w:r></w:p><w:sectPr>")
@@ -38,7 +38,7 @@ fn edited_text_and_new_paragraphs_keep_styles_and_objects() {
 
     // The written document converts again, with its character styles, picture and footer.
     let again = dir.join("again.docx");
-    pages2docx::convert(&out, &again).unwrap();
+    pages_bridge::convert(&out, &again).unwrap();
     let xml = read_part(&again, "word/document.xml").unwrap();
     assert!(run_props(&xml, "Fett").contains("<w:b/>"));
     assert!(run_props(&xml, "Ende").contains("<w:b/>"), "style after the edit still sits on the right characters");
@@ -66,19 +66,19 @@ fn formatting_uses_existing_styles_or_is_reported() {
     let dir = scratch_dir("wb-format");
     let (pages, docx, out) = (dir.join("a.pages"), dir.join("a.docx"), dir.join("out.pages"));
     build_document(&pages);
-    pages2docx::convert(&pages, &docx).unwrap();
+    pages_bridge::convert(&pages, &docx).unwrap();
     // " Bild" is plain. The document has a bold style, so bold can be carried over.
     edit_docx(&docx, |xml| format_run(xml, " Bild", "<w:b/>"));
     let report = write_back(&pages, &docx, &out, Options::default()).unwrap();
     assert!(report.not_written.is_empty(), "{report:?}");
     let again = dir.join("again.docx");
-    pages2docx::convert(&out, &again).unwrap();
+    pages_bridge::convert(&out, &again).unwrap();
     let xml = read_part(&again, "word/document.xml").unwrap();
     assert!(run_props(&xml, " Bild").contains("<w:b/>"));
     assert!(!run_props(&xml, " und ").contains("<w:b/>"));
 
     // Bold and italic together: no style of the document gives both.
-    pages2docx::convert(&pages, &docx).unwrap();
+    pages_bridge::convert(&pages, &docx).unwrap();
     edit_docx(&docx, |xml| format_run(xml, " Bild", "<w:b/><w:i/>"));
     std::fs::remove_file(&out).unwrap();
     let report = write_back(&pages, &docx, &out, Options::default()).unwrap();
@@ -128,7 +128,7 @@ fn text_in_a_row_pages_did_not_store() {
     let dir = scratch_dir("wb-empty-row");
     let (pages, docx, out) = (dir.join("Showcase.pages"), dir.join("Showcase.docx"), dir.join("out.pages"));
     std::fs::copy(original, &pages).unwrap();
-    pages2docx::convert(&pages, &docx).unwrap();
+    pages_bridge::convert(&pages, &docx).unwrap();
     let before = table_texts(&read_part(&docx, "word/document.xml").unwrap());
     // The last row is completely empty, so Pages keeps no cells for it.
     assert!(before[4].iter().all(String::is_empty));
@@ -138,7 +138,7 @@ fn text_in_a_row_pages_did_not_store() {
     assert_eq!(report.cells_changed, 1, "{report:?}");
     assert!(report.not_written.is_empty(), "{report:?}");
     let again = dir.join("again.docx");
-    pages2docx::convert(&out, &again).unwrap();
+    pages_bridge::convert(&out, &again).unwrap();
     let mut expected = before;
     expected[4][2] = "test2".to_owned();
     assert_eq!(table_texts(&read_part(&again, "word/document.xml").unwrap()), expected);
@@ -162,7 +162,7 @@ fn a_style_chosen_in_the_word_processor_is_written_back() {
     let dir = scratch_dir("wb-restyle");
     let (pages, docx, out) = (dir.join("Cuba.pages"), dir.join("Cuba.docx"), dir.join("out.pages"));
     std::fs::copy(original, &pages).unwrap();
-    pages2docx::convert(&pages, &docx).unwrap();
+    pages_bridge::convert(&pages, &docx).unwrap();
     // Pages' "Überschrift" is Word's "Heading 1"; "Quote" does not exist in the Pages document.
     edit_docx(&docx, |xml| restyle(&restyle(xml, "geografía, población", "Heading1"), "colonialismo", "Quote"));
 
@@ -170,7 +170,7 @@ fn a_style_chosen_in_the_word_processor_is_written_back() {
     assert_eq!(report.paragraphs_changed, 1, "{report:?}");
     assert_eq!(report.not_written.len(), 1, "the unknown style is reported: {report:?}");
     let again = dir.join("again.docx");
-    pages2docx::convert(&out, &again).unwrap();
+    pages_bridge::convert(&out, &again).unwrap();
     let xml = read_part(&again, "word/document.xml").unwrap();
     let heading = &xml[..xml.find("geografía, población").unwrap()];
     assert!(heading[heading.rfind("<w:p>").unwrap()..].contains("<w:pStyle w:val=\"Heading1\"/>"));
@@ -186,13 +186,13 @@ fn reference_document_round_trip() {
     let dir = scratch_dir("wb-reference");
     let (pages, docx, out) = (dir.join("Cuba.pages"), dir.join("Cuba.docx"), dir.join("out.pages"));
     std::fs::copy(original, &pages).unwrap();
-    pages2docx::convert(&pages, &docx).unwrap();
+    pages_bridge::convert(&pages, &docx).unwrap();
     edit_docx(&docx, |xml| xml.replace("acrual", "actual"));
 
     let report = write_back(&pages, &docx, &out, Options::default()).unwrap();
     assert_eq!(report.paragraphs_changed, 1, "{report:?}");
     let again = dir.join("again.docx");
-    pages2docx::convert(&out, &again).unwrap();
+    pages_bridge::convert(&out, &again).unwrap();
     let xml = read_part(&again, "word/document.xml").unwrap();
     assert!(xml.contains("situación económica actual de Cuba"));
     assert_eq!(xml.matches("<w:hyperlink ").count(), 7, "links survive");

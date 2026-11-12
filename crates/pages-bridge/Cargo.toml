@@ -1,21 +1,23 @@
 [package]
-name = "pages2docx"
-description = "Converts Apple Pages documents to Word .docx and opens them in a configurable word processor"
+name = "pages-bridge"
+description = "Opens Apple Pages documents in Word-compatible word processors and writes the edits back into the .pages file"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
+build = "build.rs"
 
 [lints]
 workspace = true
 
 [[bin]]
-name = "pages2docx"
+name = "pages-bridge"
 path = "src/main.rs"
 
 [[bin]]
-name = "pages2docxw"
-path = "src/bin/pages2docxw.rs"
+name = "pages-bridgew"
+path = "src/bin/pages-bridgew.rs"
 
 [dependencies]
 anyhow = "1.0.104"
@@ -26,7 +28,14 @@ serde_json = "1.0.154"
 zip = { version = "7.3.0", default-features = false, features = ["deflate"] }
 
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }
+mslnk = "0.1.8"
+self-replace = "1.5.1"
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_UI_Controls",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 winreg = "0.56.0"
 
 [dev-dependencies]
